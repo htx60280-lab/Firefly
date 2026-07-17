@@ -1,0 +1,14 @@
+---
+import AdminPanel from "@components/pages/AdminPanel.svelte";
+import MainGridLayout from "@layouts/MainGridLayout.astro";
+
+// 后台页不进 sitemap、不进 pagefind 索引
+const title = "管理后台";
+const description = "Volant 管理后台";
+---
+
+<MainGridLayout title={title} description={description}>
+    <div class="min-h-[80vh]">
+        <AdminPanel client:load />
+    </div>
+</MainGridLayout>
