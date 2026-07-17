@@ -1,8 +1,12 @@
 {
 	"name": "firefly",
+	// 启用 cloudflare adapter（CF_WORKERS=1 构建）后，运行时端点经此入口运行；
+	// 未启用 adapter 时该字段忽略，不破坏原纯静态 Workers Assets 部署
+	"main": "@astrojs/cloudflare/entrypoints/server",
 	"compatibility_date": "2025-01-01",
 	"compatibility_flags": ["nodejs_compat"],
 	"assets": {
-		"directory": "./dist"
+		"directory": "./dist",
+		"binding": "ASSETS"
 	}
 }
