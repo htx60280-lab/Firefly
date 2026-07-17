@@ -6,8 +6,9 @@ if (!commentConfig?.giscus) {
 }
 
 const giscus = commentConfig.giscus;
-const lightTheme = "light";
-const darkTheme = "dark";
+// 使用无框透明主题，让 Giscus iframe 融入博客卡片背景，避免"框中框"突兀感
+const lightTheme = "noborder_light";
+const darkTheme = "noborder_dark";
 ---
 
 <!-- 
