@@ -239,12 +239,21 @@ export async function uploadImage(
 	return { path, sha: data.content?.sha ?? "" };
 }
 
-/** 触发 Cloudflare Pages Deploy Hook。失败不阻断上传结果（文章已入仓） */
+/**
+ * 触发 Cloudflare Deploy Hook。
+ *
+ * 说明：CF worker 项目若已连 Git 自动部署，写仓 push 本身就触发一次构建，
+ * 此时 CF_DEPLOY_HOOK 冗余（会与 Git webhook 叠加触发两次构建）。
+ * 建议在该前提下不配 CF_DEPLOY_HOOK：本函数返回"依赖 Git 自动构建"，
+ * 文章照常上线。仅当未连 Git 自动部署、或想强制立即重建时才配置它。
+ *
+ * 失败不阻断上传结果（文章已入仓，Git push 会兜底触发构建）。
+ */
 export async function triggerRedeploy(
 	env: GhEnv,
 ): Promise<{ ok: boolean; detail: string }> {
 	if (!env.deployHook)
-		return { ok: false, detail: "未配置 CF_DEPLOY_HOOK，需手动触发构建" };
+		return { ok: true, detail: "已写入仓库，Git 自动部署将触发构建（约1-2分钟生效）" };
 	try {
 		const res = await fetch(env.deployHook, { method: "POST" });
 		if (!res.ok) return { ok: false, detail: `Deploy Hook 返回 ${res.status}` };

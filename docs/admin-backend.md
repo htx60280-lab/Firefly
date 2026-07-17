@@ -29,7 +29,7 @@
 | `CF_WORKERS` | **是** | 部署构建变量，设为 `1` 才启用 cloudflare adapter，否则线上 API 404 |
 | `ADMIN_PASSWORD` | **是** | 后台登录密码，兼作 HMAC 签名密钥 |
 | `GH_TOKEN` | **是** | GitHub Fine-grained PAT，授权 Firefly 仓库 Contents 读写 |
-| `CF_DEPLOY_HOOK` | 推荐 | Cloudflare 项目 Settings → Deploy Hooks 创建(分支选 master)的 URL |
+| `CF_DEPLOY_HOOK` | 视情 | **已连 Git 自动部署时不需要(否则一次保存触发两次构建)**。仅当未连 Git 自动部署、或想强制立即重建时才配:Settings → Deploy Hooks 创建(分支选 master)的 URL |
 | `GH_REPO_OWNER` | 否 | 默认 `htx60280-lab` |
 | `GH_REPO_NAME` | 否 | 默认 `Firefly` |
 | `GH_BRANCH` | 否 | 默认 `main`(注意本仓实际默认分支是 `master`,本地/线上建议显式设 `GH_BRANCH=master`) |
@@ -57,14 +57,14 @@
    - 添加(Encrypt 类型):
      - `ADMIN_PASSWORD` = 你的后台登录密码(自定义,**设强一点**)
      - `GH_TOKEN` = GitHub PAT(见下方获取方式)
-     - `CF_DEPLOY_HOOK` = Deploy Hook URL(见下方获取方式,可选但强烈推荐)
+     - `CF_DEPLOY_HOOK` = Deploy Hook URL。**已连 Git 自动部署时不要配**（会与 push 叠加触发两次构建）；仅未连 Git 自动部署时才需要。本仓默认已连 Git 自动部署，建议这项直接不设。
      - `GH_BRANCH` = `master`(本仓默认分支是 master,不设会回退到 main 导致查不到文章)
    - 保存。Secrets 改动会自动触发新构建部署。
 
-3. **创建 Deploy Hook**(用于后端写完文章后自动触发重建)
-   - 同项目 Settings → **Builds & deployments** → **Deploy Hooks** → Add Deploy Hook
-   - 名称随意(如 `admin-upload`),**Branch 选 `master`**
-   - 创建后复制 URL(形如 `https://api.cloudflare.com/client/v4/pages/webhooks/deploy_hooks/xxx`),填进上面的 `CF_DEPLOY_HOOK`
+3. **创建 Deploy Hook —— 多数情况可跳过本步**
+   - 本仓默认已连 Git 自动部署（push 即自动构建），**不需要** Deploy Hook：写仓 push 本身就会触发 CF 构建。再配 hook 会与 push 叠加，导致一次保存触发两次构建。
+   - 仅当你的项目**没连** Git 自动部署、或想保留一个"随时手动强制重建"的入口时，才配：
+     同项目 Settings → **Builds & deployments** → **Deploy Hooks** → Add Deploy Hook → 名称随意、**Branch 选 `master`** → 复制 URL 填进上面的 `CF_DEPLOY_HOOK`。
 
 ### 三、环境变量获取方式
 
@@ -73,7 +73,7 @@
   - Repository access 选 **Only select repositories** → 勾选 `htx60280-lab/Firefly`
   - Repository permissions → **Contents: Read and write**(其他保持默认即可)
   - 生成后复制(只显示一次),填进 CF Secret `GH_TOKEN`
-- **CF_DEPLOY_HOOK**:见上面第 3 步。
+- **CF_DEPLOY_HOOK**:见上面第 3 步（已连 Git 自动部署时直接不设）。
 
 ### 四、验证部署成功
 
@@ -81,8 +81,8 @@
 2. 浏览器打开 `https://你的域名/admin/`,应看到登录框。
 3. 输入 `ADMIN_PASSWORD` 登录,进后台。
 4. 点「写文章」,填标题/正文(先用假内容试一篇 draft),保存 → 看后端是否返回「已新增 + 已触发重建」。
-5. 去 CF Deployments 看是否自动多了一次构建(由 Deploy Hook 触发);构建成功后 1-2 分钟,文章页上线。
-6. 若「写文章」报 GitHub 401/403 → `GH_TOKEN` 权限或仓库选择不对;若提示「未配置 GitHub 凭证」→ `GH_TOKEN` 没设或拼错;若提示「未触发构建」→ `CF_DEPLOY_HOOK` 没设或分支名写错。
+5. 去 CF Deployments 看是否自动多了一次构建(由写仓的 git push 触发);构建成功后 1-2 分钟,文章页上线。若发现一次保存出现两次构建,说明同时配了 Git 自动部署和 `CF_DEPLOY_HOOK` —— 删掉后者即可。
+6. 若「写文章」报 GitHub 401/403 → `GH_TOKEN` 权限或仓库选择不对;若提示「未配置 GitHub 凭证」→ `GH_TOKEN` 没设或拼错;若文章已入仓站点却不更新 → 未连 Git 自动部署且未配 `CF_DEPLOY_HOOK`,或分支名写错(`GH_BRANCH`/Hook Branch 都要 master)。
 
 ### 五、常见排错
 
@@ -90,10 +90,13 @@
 |---|---|---|
 | 构建报 `NoAdapterInstalled` | 没设 `CF_WORKERS=1` | 在 Build 的构建环境变量里加,是 `1` 不是 `true` |
 | 构建绿但 `/api/admin/*` 线上 404 | 构建变量与运行时 secret 混淆,或没设 `CF_WORKERS` | 确保 `CF_WORKERS` 在 **Build** 环境变量,不在 secret;Secrets 里别放它 |
-| 登录页 500「服务未正确配置鉴权」 | `ADMIN_PASSWORD` 没设 | Secrets 加 `ADMIN_PASSWORD` 并重部署 |
+| 部署后 `ADMIN_PASSWORD` 等变量丢失 | 它们当初设成 **Plaintext**,被 `wrangler.jsonc` 当应收口清理 | 重新设为 **Encrypt(Secret)** 类型,此后任何部署都不会再丢 |
+| 一次保存触发两次 CF 构建 | 已连 Git 自动部署 + 又配了 `CF_DEPLOY_HOOK`,写仓 push 和 hook 各触发一次 | **删掉 `CF_DEPLOY_HOOK`** Secret(Git 自动部署已足够);保留则每次保存双构建 |
+| 登录页 500「服务未正确配置鉴权」 | `ADMIN_PASSWORD` 没设或又被清理 | Secrets 用 Encrypt 类型加 `ADMIN_PASSWORD` 并重部署 |
 | 列/写文章 502「fetch failed」或 401 | `GH_TOKEN` 权限/仓库错 | 确认 PAT 勾选 Firefly 仓库且 Contents 读写 |
-| 文章写进仓库了但站点没更新 | `CF_DEPLOY_HOOK` 没配或分支选错 | 重建 Deploy Hook,Branch 选 master;或手动 Retry deployment |
+| 文章写进仓库了但站点没更新 | 未连 Git 自动部署且 `CF_DEPLOY_HOOK` 没配/分支选错 | 已连 Git 自动部署则删 hook 即可;未连则配 hook(Branch 选 master) |
 | 保存文章报「已存在」409 | slug 与现有文章重名 | 改标题或换 slug,或在编辑现有文章时用更新模式 |
+| 编辑现有文章报「xxx.md 不存在,无法更新」 | 改标题后前端用新标题算 slug,后端按新名查旧文件 404 | 已修复:编辑态锁定原文件名,改标题不换文件 |
 | 本地 dev 报同样 NoAdapterInstalled | dev 走 Vite 不读 CF_WORKERS | dev 不需要 adapter:本地端点在 Vite dev 下运行时渲染可工作,不报 NoAdapterInstalled(该报错只发生在 `astro build`);如需本地 `astro build`,临时 `CF_WORKERS=1 pnpm build` |
 
 > 注:本仓默认分支是 `master`,`GH_BRANCH` 和 Deploy Hook 的 Branch 都必须选 `master`,否则后端把文章写到 master、却去 main 上列文章,会查不到。
