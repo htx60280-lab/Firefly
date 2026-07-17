@@ -19,13 +19,7 @@ export const siteConfig: SiteConfig = {
 		"Volant —— 轻盈如风，载着我的所思所想。基于 Astro 与 Svelte 构建的个人博客，记录技术笔记与生活随想。",
 
 	// 站点关键词
-	keywords: [
-		"Volant",
-		"博客",
-		"技术博客",
-		"Astro",
-		"个人博客",
-	],
+	keywords: ["Volant", "博客", "技术博客", "Astro", "个人博客"],
 
 	// 主题色
 	themeColor: {
