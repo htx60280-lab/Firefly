@@ -36,8 +36,67 @@
 | `AUTH_SECRET` | 否 | 独立 HMAC 密钥，默认复用 `ADMIN_PASSWORD` |
 | `ADMIN_TTL_SECONDS` | 否 | 会话有效期秒，默认 7 天 |
 
-> GH_TOKEN 获取：GitHub Settings → Developer settings → Fine-grained tokens → 勾选 Firefly 仓库 → Contents: Read & Write。
-> CF_DEPLOY_HOOK 获取：Cloudflare 项目 → Settings → Builds & deployments → Deploy Hooks → 新建(分支选本仓默认分支)。
+## Cloudflare Workers Builds 部署教程
+
+本项目走 **Workers Builds**(Worker 部署)。`@astrojs/cloudflare@14` 已不再支持 Pages,必须用 Worker 形态。admin 端点是运行时渲染(`prerender=false`),需要 adapter,而 adapter 由构建环境变量 `CF_WORKERS=1` 开启。
+
+### 一、修复首次构建报错(关键)
+
+推送后 CF 自动构建报 `NoAdapterInstalled — Cannot use server-rendered pages without an adapter`。根因:CF 构建环境没设 `CF_WORKERS`,导致 `astro.config.mjs` 的 adapter 没启用,而项目里有运行时端点。修法是设这个构建环境变量(代码已就绪,`wrangler.jsonc` 也已配好 adapter 入口)。
+
+### 二、在 CF 控制台设置(按顺序)
+
+1. **设构建环境变量 `CF_WORKERS=1`**(修构建报错,本步必做)
+   - CF Dashboard → Workers & Pages → 选 `firefly` 项目 → Settings
+   - 找到 **Build**(或 Builds & deployments)→ **Environment variables**(构建变量,不是运行时 Variables and Secrets)
+   - 添加变量:`CF_WORKERS` = `1`
+   - 保存后触发一次 redeploy(Settings→Builds→Retry deployment,或直接 push 一个空 commit)
+
+2. **设运行时 Secrets**(Worker 运行时读取,放进 `wrangler` 的 secrets)
+   - 同项目 Settings → **Variables and Secrets**(运行时,与上一步构建变量区分开)
+   - 添加(Encrypt 类型):
+     - `ADMIN_PASSWORD` = 你的后台登录密码(自定义,**设强一点**)
+     - `GH_TOKEN` = GitHub PAT(见下方获取方式)
+     - `CF_DEPLOY_HOOK` = Deploy Hook URL(见下方获取方式,可选但强烈推荐)
+     - `GH_BRANCH` = `master`(本仓默认分支是 master,不设会回退到 main 导致查不到文章)
+   - 保存。Secrets 改动会自动触发新构建部署。
+
+3. **创建 Deploy Hook**(用于后端写完文章后自动触发重建)
+   - 同项目 Settings → **Builds & deployments** → **Deploy Hooks** → Add Deploy Hook
+   - 名称随意(如 `admin-upload`),**Branch 选 `master`**
+   - 创建后复制 URL(形如 `https://api.cloudflare.com/client/v4/pages/webhooks/deploy_hooks/xxx`),填进上面的 `CF_DEPLOY_HOOK`
+
+### 三、环境变量获取方式
+
+- **GH_TOKEN**(GitHub PAT)：
+  - GitHub → 头像 → Settings → Developer settings → Fine-grained personal access tokens → Generate new token
+  - Repository access 选 **Only select repositories** → 勾选 `htx60280-lab/Firefly`
+  - Repository permissions → **Contents: Read and write**(其他保持默认即可)
+  - 生成后复制(只显示一次),填进 CF Secret `GH_TOKEN`
+- **CF_DEPLOY_HOOK**:见上面第 3 步。
+
+### 四、验证部署成功
+
+1. 等 CF 构建完成(Deployments 列表看变绿)。
+2. 浏览器打开 `https://你的域名/admin/`,应看到登录框。
+3. 输入 `ADMIN_PASSWORD` 登录,进后台。
+4. 点「写文章」,填标题/正文(先用假内容试一篇 draft),保存 → 看后端是否返回「已新增 + 已触发重建」。
+5. 去 CF Deployments 看是否自动多了一次构建(由 Deploy Hook 触发);构建成功后 1-2 分钟,文章页上线。
+6. 若「写文章」报 GitHub 401/403 → `GH_TOKEN` 权限或仓库选择不对;若提示「未配置 GitHub 凭证」→ `GH_TOKEN` 没设或拼错;若提示「未触发构建」→ `CF_DEPLOY_HOOK` 没设或分支名写错。
+
+### 五、常见排错
+
+| 现象 | 原因 | 解法 |
+|---|---|---|
+| 构建报 `NoAdapterInstalled` | 没设 `CF_WORKERS=1` | 在 Build 的构建环境变量里加,是 `1` 不是 `true` |
+| 构建绿但 `/api/admin/*` 线上 404 | 构建变量与运行时 secret 混淆,或没设 `CF_WORKERS` | 确保 `CF_WORKERS` 在 **Build** 环境变量,不在 secret;Secrets 里别放它 |
+| 登录页 500「服务未正确配置鉴权」 | `ADMIN_PASSWORD` 没设 | Secrets 加 `ADMIN_PASSWORD` 并重部署 |
+| 列/写文章 502「fetch failed」或 401 | `GH_TOKEN` 权限/仓库错 | 确认 PAT 勾选 Firefly 仓库且 Contents 读写 |
+| 文章写进仓库了但站点没更新 | `CF_DEPLOY_HOOK` 没配或分支选错 | 重建 Deploy Hook,Branch 选 master;或手动 Retry deployment |
+| 保存文章报「已存在」409 | slug 与现有文章重名 | 改标题或换 slug,或在编辑现有文章时用更新模式 |
+| 本地 dev 报同样 NoAdapterInstalled | dev 走 Vite 不读 CF_WORKERS | dev 不需要 adapter:本地端点在 Vite dev 下运行时渲染可工作,不报 NoAdapterInstalled(该报错只发生在 `astro build`);如需本地 `astro build`,临时 `CF_WORKERS=1 pnpm build` |
+
+> 注:本仓默认分支是 `master`,`GH_BRANCH` 和 Deploy Hook 的 Branch 都必须选 `master`,否则后端把文章写到 master、却去 main 上列文章,会查不到。
 
 ## 本地测试
 
