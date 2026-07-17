@@ -36,7 +36,9 @@ export async function readGhEnv(): Promise<GhEnv> {
 	if (!token) throw new GithubConfigError("GH_TOKEN 未配置");
 	const owner = String(env.GH_REPO_OWNER ?? "").trim() || DEFAULT_OWNER;
 	const repo = String(env.GH_REPO_NAME ?? "").trim() || DEFAULT_REPO;
-	const branch = String(env.GH_BRANCH ?? "").trim() || "main";
+	// 本仓默认分支是 master；线上不设 GH_BRANCH 时回退 master 而非 main，
+	// 避免后端去查空 main 分支导致所有文章都报「不存在」。
+	const branch = String(env.GH_BRANCH ?? "").trim() || "master";
 	const deployHook = String(env.CF_DEPLOY_HOOK ?? "").trim() || undefined;
 	return { token, owner, repo, branch, deployHook };
 }

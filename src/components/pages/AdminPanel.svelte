@@ -280,8 +280,14 @@ $: tagsFromInput = tagsInput
 	.filter(Boolean);
 
 function buildPayload() {
+	// 编辑现有文章时锁定文件名不变（避免改标题导致 slug 变更、旧文件 404）；
+	// 只有创建新文章时才从标题推导 slug。
+	const slug =
+		mode === "update" && editingName
+			? editingName.replace(/\.md$/i, "")
+			: slugify(fm.title) || slugify(editingName);
 	return {
-		slug: slugify(fm.title) || slugify(editingName),
+		slug,
 		title: fm.title,
 		published: fm.published,
 		updated: fm.updated || undefined,
