@@ -1008,38 +1008,39 @@ onMount(async () => {
 			</form>
 		</div>
 	{:else}
-		<!-- 顶栏：发布区（全局） -->
-		<div
-			class="admin-topbar p-3 mb-4 flex flex-wrap items-center justify-between gap-2 sticky top-[4.75rem] z-30 bg-(--card-bg)/95 backdrop-blur rounded-(--radius-large) border border-black/5 dark:border-white/10"
-		>
-			<div class="text-sm text-(--btn-content)">
-				{#if stagingCount > 0}
-					<span class="font-semibold text-(--primary)">待发布 {stagingCount} 条</span>
-					<span class="text-(--content-meta)"> · 修改先存本地，点发布才 1 次 commit</span>
-				{:else}
-					<span class="text-(--content-meta)">暂存为空 · 编辑保存后会出现在这里</span>
-				{/if}
-			</div>
-			<div class="flex flex-wrap gap-2">
-				{#if stagingCount > 0}
+		<!-- 顶栏：发布区固定在视口顶部（导航下方），滚动始终可见 -->
+		<div class="admin-topbar-spacer" aria-hidden="true"></div>
+		<div class="admin-topbar">
+			<div class="admin-topbar-inner">
+				<div class="text-sm text-(--btn-content) min-w-0">
+					{#if stagingCount > 0}
+						<span class="font-semibold text-(--primary)">待发布 {stagingCount} 条</span>
+						<span class="text-(--content-meta)"> · 修改先存本地，点发布才 1 次 commit</span>
+					{:else}
+						<span class="text-(--content-meta)">暂存为空 · 编辑保存后会出现在这里</span>
+					{/if}
+				</div>
+				<div class="flex flex-wrap gap-2 shrink-0">
+					{#if stagingCount > 0}
+						<button
+							on:click={() => (view = "staging")}
+							class="px-3 py-1.5 rounded-lg bg-(--btn-regular-bg) text-(--btn-content) text-sm"
+							>查看暂存</button
+						>
+						<button
+							on:click={discardAllStaging}
+							class="px-3 py-1.5 rounded-lg bg-(--btn-regular-bg) text-(--btn-content) text-sm"
+							>清空暂存</button
+						>
+					{/if}
 					<button
-						on:click={() => (view = "staging")}
-						class="px-3 py-1.5 rounded-lg bg-(--btn-regular-bg) text-(--btn-content) text-sm"
-						>查看暂存</button
+						on:click={publishAll}
+						disabled={publishBusy || stagingCount === 0}
+						class="px-4 py-1.5 rounded-lg bg-(--primary) text-white text-sm font-semibold disabled:opacity-50"
 					>
-					<button
-						on:click={discardAllStaging}
-						class="px-3 py-1.5 rounded-lg bg-(--btn-regular-bg) text-(--btn-content) text-sm"
-						>清空暂存</button
-					>
-				{/if}
-				<button
-					on:click={publishAll}
-					disabled={publishBusy || stagingCount === 0}
-					class="px-4 py-1.5 rounded-lg bg-(--primary) text-white text-sm font-semibold disabled:opacity-50"
-				>
-					{publishBusy ? "发布中…" : `发布全部（1 次提交）`}
-				</button>
+						{publishBusy ? "发布中…" : `发布全部（1 次提交）`}
+					</button>
+				</div>
 			</div>
 		</div>
 		{#if publishMsg}
@@ -1468,3 +1469,56 @@ onMount(async () => {
 <datalist id="tag-list">
 	{#each knownTags as t}<option value={t}></option>{/each}
 </datalist>
+
+<style>
+	/* 固定在视口顶部；高度与 spacer 同步，避免遮挡正文 */
+	.admin-topbar {
+		position: fixed;
+		/* stickyNavbar 导航约 4.5rem */
+		top: 4.5rem;
+		left: 0;
+		right: 0;
+		z-index: 70;
+		pointer-events: none;
+		padding: 0.5rem 1rem 0;
+	}
+	:global(body:not(.sticky-navbar)) .admin-topbar {
+		top: 0.5rem;
+	}
+	.admin-topbar-inner {
+		pointer-events: auto;
+		max-width: 72rem; /* max-w-6xl */
+		margin: 0 auto;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+		padding: 0.75rem;
+		border-radius: var(--radius-large);
+		background: color-mix(in srgb, var(--card-bg) 94%, transparent);
+		backdrop-filter: blur(12px);
+		-webkit-backdrop-filter: blur(12px);
+		border: 1px solid color-mix(in srgb, black 5%, transparent);
+		box-shadow: 0 8px 28px -18px rgba(0, 0, 0, 0.4);
+	}
+	:global(.dark) .admin-topbar-inner,
+	:global(html.dark) .admin-topbar-inner {
+		border-color: color-mix(in srgb, white 10%, transparent);
+	}
+	/* 占位：与顶栏内容高度大致一致（padding + 单行按钮） */
+	.admin-topbar-spacer {
+		height: 4.25rem;
+		margin-bottom: 0.75rem;
+	}
+	@media (max-width: 640px) {
+		.admin-topbar {
+			padding-left: 0.75rem;
+			padding-right: 0.75rem;
+		}
+		.admin-topbar-spacer {
+			height: 5.5rem;
+		}
+	}
+</style>
+
