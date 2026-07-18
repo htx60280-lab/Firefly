@@ -1,5 +1,6 @@
 <script lang="ts">
 import { onMount } from "svelte";
+import AdminTipTapEditor from "./AdminTipTapEditor.svelte";
 
 // ===================== 类型 =====================
 interface PostListItem {
@@ -102,10 +103,11 @@ let mdUploadMsg = "";
 let mdFileInput: HTMLInputElement | null = null;
 let tagsInput = "";
 let newTagDraft = "";
-let bodyEl: HTMLTextAreaElement | null = null;
-let markedFn: ((src: string) => string) | null = null;
-let previewHtml = "";
-let showPreview = true;
+/** Tiptap 编辑器实例（bind:this） */
+let tipTap: { insertImage: (src: string, alt?: string) => void; getMarkdown: () => string } | null =
+	null;
+/** 切换文章时递增，强制编辑器重载 Markdown */
+let editorKey = "new";
 
 // ===================== 工具 =====================
 function emptyFrontmatter(): Frontmatter {
@@ -202,14 +204,6 @@ function clearStaging() {
 function getStaged(name: string): StagedItem | undefined {
 	const n = normalizeName(name);
 	return staging.find((x) => normalizeName(x.name) === n);
-}
-
-$: if (markedFn) {
-	try {
-		previewHtml = markedFn(body);
-	} catch {
-		previewHtml = "<p style='color:#c00'>预览渲染出错</p>";
-	}
 }
 
 /** 列表 = 远端 + 暂存合并视图 */
@@ -730,6 +724,7 @@ function newPost() {
 	slugInput = "";
 	tagsInput = "";
 	saveMsg = "";
+	editorKey = `new-${Date.now()}`;
 	view = "edit";
 }
 
@@ -764,6 +759,7 @@ async function editPost(name: string) {
 			tagsInput = fm.tags.join(", ");
 			slugInput = name.replace(/\.md$/i, "");
 			mode = "update";
+			editorKey = `stage-${name}-${staged.stagedAt}`;
 			view = "edit";
 			saveMsg = "正在编辑暂存版本（尚未发布到 GitHub）";
 			saveOk = true;
@@ -810,6 +806,7 @@ async function editPost(name: string) {
 		tagsInput = fm.tags.join(", ");
 		slugInput = name.replace(/\.md$/i, "");
 		mode = "update";
+		editorKey = `remote-${name}-${data.sha || Date.now()}`;
 		view = "edit";
 		saveMsg = "";
 	} catch (e) {
@@ -862,6 +859,10 @@ $: tagsFromInput = tagsInput
 
 /** 保存到本地暂存（不 push GitHub） */
 function stageSave() {
+	// 从 Tiptap 强制同步最新 Markdown（含源码模式）
+	if (tipTap?.getMarkdown) {
+		body = tipTap.getMarkdown();
+	}
 	if (!fm.title.trim()) {
 		saveMsg = "请填写标题";
 		saveOk = false;
@@ -941,7 +942,8 @@ async function uploadImageFile(file: File) {
 		const data = await r.json().catch(() => ({}));
 		if (r.ok) {
 			imgMsg = `已上传：${data.ref}（图片会单独产生一次 commit）`;
-			insertAtCursor(`![图片描述](${data.ref})\n\n`);
+			if (tipTap?.insertImage) tipTap.insertImage(data.ref, "图片描述");
+			else body = `${body}\n![图片描述](${data.ref})\n\n`;
 		} else if (r.status === 401) {
 			loggedIn = false;
 			imgMsg = "会话过期";
@@ -954,62 +956,6 @@ async function uploadImageFile(file: File) {
 		imgUploading = false;
 	}
 }
-function insertAtCursor(text: string) {
-	const el = bodyEl;
-	if (!el) {
-		body = body + (body.endsWith("\n") ? "" : "\n") + text;
-		return;
-	}
-	const start = el.selectionStart ?? body.length;
-	const end = el.selectionEnd ?? body.length;
-	body = body.slice(0, start) + text + body.slice(end);
-	requestAnimationFrame(() => {
-		el.focus();
-		const pos = start + text.length;
-		el.setSelectionRange(pos, pos);
-	});
-}
-function wrapSelection(before: string, after: string, placeholder = "文本") {
-	const el = bodyEl;
-	if (!el) {
-		insertAtCursor(before + placeholder + after);
-		return;
-	}
-	const start = el.selectionStart ?? 0;
-	const end = el.selectionEnd ?? 0;
-	const selectedText = body.slice(start, end) || placeholder;
-	const text = before + selectedText + after;
-	body = body.slice(0, start) + text + body.slice(end);
-	requestAnimationFrame(() => {
-		el.focus();
-		el.setSelectionRange(
-			start + before.length,
-			start + before.length + selectedText.length,
-		);
-	});
-}
-function onPaste(e: ClipboardEvent) {
-	const items = e.clipboardData?.items;
-	if (!items) return;
-	for (const it of items) {
-		if (it.kind === "file" && it.type.startsWith("image/")) {
-			const f = it.getAsFile();
-			if (f) {
-				e.preventDefault();
-				uploadImageFile(f);
-			}
-		}
-	}
-}
-function onDrop(e: DragEvent) {
-	if (!e.dataTransfer) return;
-	const files = Array.from(e.dataTransfer.files).filter((f) =>
-		f.type.startsWith("image/"),
-	);
-	if (!files.length) return;
-	e.preventDefault();
-	for (const f of files) uploadImageFile(f);
-}
 function onFilePick(e: Event) {
 	const input = e.target as HTMLInputElement;
 	if (!input.files) return;
@@ -1017,22 +963,6 @@ function onFilePick(e: Event) {
 	input.value = "";
 }
 
-async function loadMarked() {
-	if (markedFn) return;
-	try {
-		// @ts-expect-error CDN
-		const mod = await import("https://esm.sh/marked@12");
-		markedFn = (mod.marked || mod.default).parse.bind(mod.marked || mod.default);
-	} catch {
-		markedFn = (s: string) => `<pre>${escapeHtml(s)}</pre>`;
-	}
-}
-function escapeHtml(s: string): string {
-	return s.replace(
-		/[&<>]/g,
-		(c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c] || c,
-	);
-}
 function str(v: unknown, d: string): string {
 	return typeof v === "string" ? v : v == null ? d : String(v);
 }
@@ -1050,10 +980,8 @@ onMount(async () => {
 	await checkAuth();
 	if (loggedIn) {
 		await listPosts();
-		loadMarked();
 	}
 });
-$: if (view === "edit") loadMarked();
 </script>
 
 <div class="admin-panel max-w-6xl mx-auto pb-16">
@@ -1323,25 +1251,18 @@ $: if (view === "edit") loadMarked();
 				</div>
 			{/if}
 		{:else}
-			<!-- 编辑器 -->
+			<!-- 编辑：上元数据，下 Tiptap 正文 -->
 			<div class="flex flex-wrap items-center justify-between gap-2 mb-4">
 				<button
 					on:click={backToList}
 					class="text-sm text-(--content-meta) hover:text-(--primary)">← 返回列表</button
 				>
-				<div class="flex gap-2">
-					<button
-						on:click={() => (showPreview = !showPreview)}
-						class="px-3 py-1.5 rounded-lg bg-(--btn-regular-bg) text-(--btn-content) text-sm"
-						>{showPreview ? "隐藏预览" : "显示预览"}</button
-					>
-					<button
-						on:click={stageSave}
-						class="px-4 py-1.5 rounded-lg bg-(--primary) text-white text-sm font-semibold"
-					>
-						暂存（不推送）
-					</button>
-				</div>
+				<button
+					on:click={stageSave}
+					class="px-4 py-1.5 rounded-lg bg-(--primary) text-white text-sm font-semibold"
+				>
+					暂存（不推送）
+				</button>
 			</div>
 			{#if saveMsg}
 				<div class="card-base p-3 mb-3 text-sm {saveOk ? 'text-green-600' : 'text-red-500'}">
@@ -1349,17 +1270,17 @@ $: if (view === "edit") loadMarked();
 				</div>
 			{/if}
 
-			<div class="grid grid-cols-1 {showPreview ? 'lg:grid-cols-2' : ''} gap-4">
-				<div class="flex flex-col gap-3">
-					<div class="card-base p-4 flex flex-col gap-3">
-						<div>
-							<label class="block text-sm text-(--content-meta) mb-1">标题 *</label>
-							<input
-								bind:value={fm.title}
-								on:input={onTitleInput}
-								class="w-full px-3 py-2 rounded-lg border border-(--btn-regular-bg) bg-(--card-bg) text-(--btn-content)"
-							/>
-						</div>
+			<div class="flex flex-col gap-4">
+				<div class="card-base p-4 flex flex-col gap-3">
+					<div>
+						<label class="block text-sm text-(--content-meta) mb-1">标题 *</label>
+						<input
+							bind:value={fm.title}
+							on:input={onTitleInput}
+							class="w-full px-3 py-2 rounded-lg border border-(--btn-regular-bg) bg-(--card-bg) text-(--btn-content) text-lg font-medium"
+						/>
+					</div>
+					<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
 						<div>
 							<label class="block text-sm text-(--content-meta) mb-1">
 								文件名 slug {mode === "update" ? "（锁定）" : ""}
@@ -1371,7 +1292,7 @@ $: if (view === "edit") loadMarked();
 								class="w-full px-3 py-2 rounded-lg border border-(--btn-regular-bg) bg-(--card-bg) text-(--btn-content) disabled:opacity-60 font-mono text-sm"
 							/>
 						</div>
-						<div class="grid grid-cols-2 gap-3">
+						<div class="grid grid-cols-2 gap-2">
 							<div>
 								<label class="block text-sm text-(--content-meta) mb-1">发布日期</label>
 								<input
@@ -1389,6 +1310,8 @@ $: if (view === "edit") loadMarked();
 								/>
 							</div>
 						</div>
+					</div>
+					<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
 						<div>
 							<label class="block text-sm text-(--content-meta) mb-1">分类</label>
 							<input
@@ -1448,132 +1371,92 @@ $: if (view === "edit") loadMarked();
 								>
 							</div>
 						</div>
-						<div>
-							<label class="block text-sm text-(--content-meta) mb-1">摘要</label>
-							<textarea
-								bind:value={fm.description}
-								rows="2"
-								class="w-full px-3 py-2 rounded-lg border border-(--btn-regular-bg) bg-(--card-bg) text-(--btn-content)"
-							></textarea>
-						</div>
-						<div>
-							<label class="block text-sm text-(--content-meta) mb-1">封面</label>
+					</div>
+					<div>
+						<label class="block text-sm text-(--content-meta) mb-1">摘要</label>
+						<textarea
+							bind:value={fm.description}
+							rows="2"
+							class="w-full px-3 py-2 rounded-lg border border-(--btn-regular-bg) bg-(--card-bg) text-(--btn-content)"
+						></textarea>
+					</div>
+					<div>
+						<label class="block text-sm text-(--content-meta) mb-1">封面</label>
+						<input
+							bind:value={fm.image}
+							class="w-full px-3 py-2 rounded-lg border border-(--btn-regular-bg) bg-(--card-bg) text-(--btn-content)"
+						/>
+					</div>
+					<div class="flex flex-wrap gap-4 text-sm text-(--btn-content)">
+						<label class="flex items-center gap-2"
+							><input type="checkbox" bind:checked={fm.draft} /> 草稿</label
+						>
+						<label class="flex items-center gap-2"
+							><input type="checkbox" bind:checked={fm.pinned} /> 置顶</label
+						>
+						<label class="flex items-center gap-2"
+							><input type="checkbox" bind:checked={fm.comment} /> 允许评论</label
+						>
+					</div>
+					<details class="text-sm">
+						<summary class="cursor-pointer text-(--content-meta)">高级</summary>
+						<div class="flex flex-col gap-3 mt-2">
 							<input
-								bind:value={fm.image}
-								class="w-full px-3 py-2 rounded-lg border border-(--btn-regular-bg) bg-(--card-bg) text-(--btn-content)"
+								bind:value={fm.author}
+								placeholder="作者"
+								class="px-3 py-2 rounded-lg border border-(--btn-regular-bg) bg-(--card-bg) text-(--btn-content)"
+							/>
+							<input
+								bind:value={fm.sourceLink}
+								placeholder="原文链接"
+								class="px-3 py-2 rounded-lg border border-(--btn-regular-bg) bg-(--card-bg) text-(--btn-content)"
+							/>
+							<input
+								type="password"
+								bind:value={fm.password}
+								placeholder="加密密码"
+								class="px-3 py-2 rounded-lg border border-(--btn-regular-bg) bg-(--card-bg) text-(--btn-content)"
+							/>
+							<input
+								bind:value={fm.passwordHint}
+								placeholder="密码提示"
+								class="px-3 py-2 rounded-lg border border-(--btn-regular-bg) bg-(--card-bg) text-(--btn-content)"
 							/>
 						</div>
-						<div class="flex flex-wrap gap-4 text-sm text-(--btn-content)">
-							<label class="flex items-center gap-2"
-								><input type="checkbox" bind:checked={fm.draft} /> 草稿</label
-							>
-							<label class="flex items-center gap-2"
-								><input type="checkbox" bind:checked={fm.pinned} /> 置顶</label
-							>
-							<label class="flex items-center gap-2"
-								><input type="checkbox" bind:checked={fm.comment} /> 允许评论</label
-							>
-						</div>
-						<details class="text-sm">
-							<summary class="cursor-pointer text-(--content-meta)">高级</summary>
-							<div class="flex flex-col gap-3 mt-2">
-								<input
-									bind:value={fm.author}
-									placeholder="作者"
-									class="px-3 py-2 rounded-lg border border-(--btn-regular-bg) bg-(--card-bg) text-(--btn-content)"
-								/>
-								<input
-									bind:value={fm.sourceLink}
-									placeholder="原文链接"
-									class="px-3 py-2 rounded-lg border border-(--btn-regular-bg) bg-(--card-bg) text-(--btn-content)"
-								/>
-								<input
-									type="password"
-									bind:value={fm.password}
-									placeholder="加密密码"
-									class="px-3 py-2 rounded-lg border border-(--btn-regular-bg) bg-(--card-bg) text-(--btn-content)"
-								/>
-								<input
-									bind:value={fm.passwordHint}
-									placeholder="密码提示"
-									class="px-3 py-2 rounded-lg border border-(--btn-regular-bg) bg-(--card-bg) text-(--btn-content)"
-								/>
-							</div>
-						</details>
-					</div>
-
-					<div class="card-base p-4 flex flex-col gap-2">
-						<div class="flex flex-wrap items-center justify-between gap-2">
-							<label class="text-sm text-(--content-meta)">正文 Markdown</label>
-							<div class="flex flex-wrap gap-1">
-								<button
-									type="button"
-									class="text-xs px-2 py-1 rounded bg-(--btn-regular-bg) text-(--btn-content)"
-									on:click={() => wrapSelection("**", "**", "粗体")}>B</button
-								>
-								<button
-									type="button"
-									class="text-xs px-2 py-1 rounded bg-(--btn-regular-bg) text-(--btn-content)"
-									on:click={() => wrapSelection("*", "*", "斜体")}>I</button
-								>
-								<button
-									type="button"
-									class="text-xs px-2 py-1 rounded bg-(--btn-regular-bg) text-(--btn-content)"
-									on:click={() => wrapSelection("`", "`", "code")}>`</button
-								>
-								<button
-									type="button"
-									class="text-xs px-2 py-1 rounded bg-(--btn-regular-bg) text-(--btn-content)"
-									on:click={() => insertAtCursor("\n## 标题\n\n")}>H2</button
-								>
-								<button
-									type="button"
-									class="text-xs px-2 py-1 rounded bg-(--btn-regular-bg) text-(--btn-content)"
-									on:click={() => insertAtCursor("\n- 列表项\n")}>列表</button
-								>
-								<button
-									type="button"
-									class="text-xs px-2 py-1 rounded bg-(--btn-regular-bg) text-(--btn-content)"
-									on:click={() => wrapSelection("[", "](https://)", "链接")}>链接</button
-								>
-								<label
-									class="text-xs px-2 py-1 rounded bg-(--btn-regular-bg) text-(--btn-content) cursor-pointer"
-								>
-									图片
-									<input
-										type="file"
-										accept="image/*"
-										multiple
-										class="hidden"
-										on:change={onFilePick}
-									/>
-								</label>
-							</div>
-						</div>
-						<textarea
-							bind:this={bodyEl}
-							bind:value={body}
-							on:paste={onPaste}
-							on:drop={onDrop}
-							on:dragover|preventDefault
-							rows="20"
-							class="w-full px-3 py-2 rounded-lg border border-(--btn-regular-bg) bg-(--card-bg) text-(--btn-content) font-mono text-sm"
-						></textarea>
-						{#if imgMsg}
-							<div class="text-xs text-(--content-meta)">
-								{imgUploading ? "上传中… " : ""}{imgMsg}
-							</div>
-						{/if}
-					</div>
+					</details>
 				</div>
-				{#if showPreview}
-					<div
-						class="card-base p-4 min-h-[400px] lg:max-h-[calc(100vh-160px)] overflow-auto sticky top-16"
-					>
-						<div class="text-sm text-(--content-meta) mb-2">实时预览</div>
-						<div class="prose max-w-none text-(--btn-content)">{@html previewHtml}</div>
+
+				<div class="card-base p-4 flex flex-col gap-2">
+					<div class="flex flex-wrap items-center justify-between gap-2">
+						<label class="text-sm text-(--content-meta)">正文（所见即所得，可切源码）</label>
+						<label
+							class="text-xs px-2 py-1 rounded bg-(--btn-regular-bg) text-(--btn-content) cursor-pointer"
+						>
+							{imgUploading ? "上传图片中…" : "插入图片"}
+							<input
+								type="file"
+								accept="image/*"
+								multiple
+								class="hidden"
+								on:change={onFilePick}
+							/>
+						</label>
 					</div>
-				{/if}
+					{#key editorKey}
+						<AdminTipTapEditor
+							bind:this={tipTap}
+							content={body}
+							contentKey={editorKey}
+							on:change={(e) => (body = e.detail)}
+							minHeight="480px"
+						/>
+					{/key}
+					{#if imgMsg}
+						<div class="text-xs text-(--content-meta)">
+							{imgUploading ? "上传中… " : ""}{imgMsg}
+						</div>
+					{/if}
+				</div>
 			</div>
 		{/if}
 	{/if}
