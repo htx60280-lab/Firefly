@@ -1426,7 +1426,7 @@ onMount(async () => {
 					</details>
 				</div>
 
-				<div class="card-base p-4 flex flex-col gap-2">
+				<div class="admin-editor-shell rounded-(--radius-large) bg-(--card-bg) p-4 flex flex-col gap-2 overflow-visible border border-black/5 dark:border-white/10">
 					<div class="flex flex-wrap items-center justify-between gap-2">
 						<label class="text-sm text-(--content-meta)">正文（所见即所得，可切源码）</label>
 						<label
