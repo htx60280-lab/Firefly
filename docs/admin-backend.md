@@ -19,8 +19,20 @@
 | `src/lib/server/env.ts` | 运行时环境变量读取：`cloudflare:workers` → 本地回退 `process.env` |
 | `src/lib/server/guard.ts` | 端点鉴权守卫，返回 status=200 sentinel 表示放行 |
 | `src/lib/server/web.ts` | JSON 响应辅助 |
-| `src/pages/api/admin/login.ts` `logout.ts` `upload.ts` `posts.ts` `post.ts` `upload-image.ts` | 运行时端点(全 `prerender=false`) |
-| `src/pages/admin.astro` + `src/components/pages/AdminPanel.svelte` | 后台页面 |
+| `src/pages/api/admin/login.ts` `logout.ts` `upload.ts` `posts.ts` `post.ts` `upload-image.ts` `batch.ts` `publish.ts` | 运行时端点(全 `prerender=false`) |
+| `src/pages/admin.astro` + `src/components/pages/AdminPanel.svelte` | 后台页面（本地暂存 + 统一发布） |
+
+## 发布模型：先暂存，再一次 commit
+
+**Deploy Hook 不会减少 Git 提交。** Hook 只触发 CF 重建；文章内容仍必须写入 Git 仓库，所以每次 Contents API 写入 = 1 次 commit。
+
+正确做法是后台改用「本地暂存」：
+
+1. 编辑 / 删除 / 批量改草稿 → 写入浏览器 `localStorage`（不碰 GitHub）
+2. 点 **发布全部** → `POST /api/admin/publish` 用 Git Data API **一次 commit 多文件**
+3. 仓库 push 触发 CF **一次**构建
+
+图片上传仍即时写仓（单独 commit），否则预览无图。
 
 ## ⚠️ 部署必备环境变量(Cloudflare 项目 Settings → 配置)
 

@@ -253,7 +253,10 @@ export async function triggerRedeploy(
 	env: GhEnv,
 ): Promise<{ ok: boolean; detail: string }> {
 	if (!env.deployHook)
-		return { ok: true, detail: "已写入仓库，Git 自动部署将触发构建（约1-2分钟生效）" };
+		return {
+			ok: true,
+			detail: "已写入仓库，Git 自动部署将触发构建（约1-2分钟生效）",
+		};
 	try {
 		const res = await fetch(env.deployHook, { method: "POST" });
 		if (!res.ok) return { ok: false, detail: `Deploy Hook 返回 ${res.status}` };
@@ -261,6 +264,162 @@ export async function triggerRedeploy(
 	} catch (e) {
 		return { ok: false, detail: `触发构建异常: ${(e as Error).message}` };
 	}
+}
+
+// ===================== Git Data API：多文件一次提交 =====================
+
+export type BatchFileOp =
+	| { path: string; content: string; op: "upsert" }
+	| { path: string; op: "delete" };
+
+export interface BatchCommitResult {
+	commitSha: string;
+	treeSha: string;
+	changed: number;
+}
+
+/**
+ * 用 Git Data API 在一次 commit 中写入/删除多个文件。
+ * 适合后台「暂存多篇 → 统一发布」：一次 push = 一次 CF 构建。
+ */
+export async function commitMultiple(
+	env: GhEnv,
+	ops: BatchFileOp[],
+	message: string,
+): Promise<BatchCommitResult> {
+	if (!ops.length) throw new GhApiError("没有可提交的变更");
+	if (ops.length > 50) throw new GhApiError("单次最多 50 个文件变更");
+
+	// 1) 当前分支 tip
+	const refRes = await ghFetch(
+		env,
+		`/repos/${env.owner}/${env.repo}/git/ref/heads/${encodeURIComponent(env.branch)}`,
+	);
+	if (!refRes.ok)
+		throw new GhApiError(
+			`读取分支 ${env.branch} 失败: ${refRes.status}`,
+			await safeText(refRes),
+		);
+	const refData = (await refRes.json()) as { object?: { sha?: string } };
+	const baseCommitSha = refData.object?.sha;
+	if (!baseCommitSha) throw new GhApiError("无法获取分支 tip commit");
+
+	// 2) base commit → base tree
+	const commitRes = await ghFetch(
+		env,
+		`/repos/${env.owner}/${env.repo}/git/commits/${baseCommitSha}`,
+	);
+	if (!commitRes.ok)
+		throw new GhApiError(
+			`读取 commit 失败: ${commitRes.status}`,
+			await safeText(commitRes),
+		);
+	const commitData = (await commitRes.json()) as {
+		tree?: { sha?: string };
+	};
+	const baseTreeSha = commitData.tree?.sha;
+	if (!baseTreeSha) throw new GhApiError("无法获取 base tree");
+
+	// 3) tree：upsert 用 content；delete 用 sha:null
+	const treePayload: Array<
+		| { path: string; mode: "100644"; type: "blob"; content: string }
+		| { path: string; mode: "100644"; type: "blob"; sha: null }
+	> = [];
+
+	for (const op of ops) {
+		const path = op.path.replace(/^\/+/, "");
+		if (!path.startsWith(POSTS_DIR) && !path.startsWith(IMAGES_DIR)) {
+			throw new GhApiError(`不允许的路径: ${path}`);
+		}
+		if (op.op === "delete") {
+			treePayload.push({
+				path,
+				mode: "100644",
+				type: "blob",
+				sha: null,
+			});
+		} else {
+			treePayload.push({
+				path,
+				mode: "100644",
+				type: "blob",
+				content: op.content,
+			});
+		}
+	}
+
+	const treeRes = await ghFetch(
+		env,
+		`/repos/${env.owner}/${env.repo}/git/trees`,
+		{
+			method: "POST",
+			body: JSON.stringify({
+				base_tree: baseTreeSha,
+				tree: treePayload,
+			}),
+		},
+	);
+	if (!treeRes.ok)
+		throw new GhApiError(
+			`创建 tree 失败: ${treeRes.status}`,
+			await safeText(treeRes),
+		);
+	const treeData = (await treeRes.json()) as { sha?: string };
+	const newTreeSha = treeData.sha;
+	if (!newTreeSha) throw new GhApiError("创建 tree 未返回 sha");
+
+	// 4) 新 commit
+	const newCommitRes = await ghFetch(
+		env,
+		`/repos/${env.owner}/${env.repo}/git/commits`,
+		{
+			method: "POST",
+			body: JSON.stringify({
+				message,
+				tree: newTreeSha,
+				parents: [baseCommitSha],
+			}),
+		},
+	);
+	if (!newCommitRes.ok)
+		throw new GhApiError(
+			`创建 commit 失败: ${newCommitRes.status}`,
+			await safeText(newCommitRes),
+		);
+	const newCommitData = (await newCommitRes.json()) as { sha?: string };
+	const newCommitSha = newCommitData.sha;
+	if (!newCommitSha) throw new GhApiError("创建 commit 未返回 sha");
+
+	// 5) 推进分支 ref（fast-forward）
+	const updateRefRes = await ghFetch(
+		env,
+		`/repos/${env.owner}/${env.repo}/git/refs/heads/${encodeURIComponent(env.branch)}`,
+		{
+			method: "PATCH",
+			body: JSON.stringify({ sha: newCommitSha, force: false }),
+		},
+	);
+	if (!updateRefRes.ok)
+		throw new GhApiError(
+			`更新分支失败: ${updateRefRes.status}（可能有并发提交，请重试）`,
+			await safeText(updateRefRes),
+		);
+
+	return {
+		commitSha: newCommitSha,
+		treeSha: newTreeSha,
+		changed: ops.length,
+	};
+}
+
+/** 文章文件名 → 仓库路径 */
+export function postPath(name: string): string {
+	return `${POSTS_DIR}/${sanitizeName(name)}`;
+}
+
+/** 图片相对路径（已含 images/ 子路径）→ 仓库路径 */
+export function imagePath(filename: string): string {
+	return `${IMAGES_DIR}/${sanitizeImageName(filename)}`;
 }
 
 export class GhApiError extends Error {
