@@ -239,47 +239,56 @@ function scrollToHeading(item: (typeof toc)[0]) {
 	}
 }
 
-/** 安全执行表格等命令：不二次 focus.run，避免吞掉 command 返回值 */
-function run(chainFn: (e: Editor) => boolean) {
+/**
+ * 普通命令：可 focus。
+ * 表格命令：禁止先 focus()——会丢失单元格选区导致 addRow/addColumn 恒为 false。
+ */
+function run(cmd: () => boolean, opts?: { keepCellSelection?: boolean }) {
 	if (!editor) return;
-	const ok = chainFn(editor);
+	const ok = cmd();
 	if (!ok) {
-		// 部分表格命令需先选中单元格
 		console.warn("[admin-tiptap] command failed");
 	}
+	if (!opts?.keepCellSelection) {
+		try {
+			editor.view.focus();
+		} catch {
+			/* ignore */
+		}
+	}
 	refreshMeta();
-	inTable = editor.isActive("table");
+	inTable = !!(editor?.isActive("table") || editor?.isActive("tableCell") || editor?.isActive("tableHeader"));
 }
 
 function toggleBold() {
-	run((e) => e.chain().focus().toggleBold().run());
+	run(() => !!editor?.chain().focus().toggleBold().run());
 }
 function toggleItalic() {
-	run((e) => e.chain().focus().toggleItalic().run());
+	run(() => !!editor?.chain().focus().toggleItalic().run());
 }
 function toggleStrike() {
-	run((e) => e.chain().focus().toggleStrike().run());
+	run(() => !!editor?.chain().focus().toggleStrike().run());
 }
 function toggleUnderline() {
-	run((e) => e.chain().focus().toggleUnderline().run());
+	run(() => !!editor?.chain().focus().toggleUnderline().run());
 }
 function toggleCode() {
-	run((e) => e.chain().focus().toggleCode().run());
+	run(() => !!editor?.chain().focus().toggleCode().run());
 }
 function setH(level: 1 | 2 | 3) {
-	run((e) => e.chain().focus().toggleHeading({ level }).run());
+	run(() => !!editor?.chain().focus().toggleHeading({ level }).run());
 }
 function toggleBullet() {
-	run((e) => e.chain().focus().toggleBulletList().run());
+	run(() => !!editor?.chain().focus().toggleBulletList().run());
 }
 function toggleOrdered() {
-	run((e) => e.chain().focus().toggleOrderedList().run());
+	run(() => !!editor?.chain().focus().toggleOrderedList().run());
 }
 function toggleQuote() {
-	run((e) => e.chain().focus().toggleBlockquote().run());
+	run(() => !!editor?.chain().focus().toggleBlockquote().run());
 }
 function toggleCodeBlock() {
-	run((e) => e.chain().focus().toggleCodeBlock().run());
+	run(() => !!editor?.chain().focus().toggleCodeBlock().run());
 }
 function setLink() {
 	if (!editor) return;
@@ -293,36 +302,51 @@ function setLink() {
 	editor.chain().focus().extendMarkRange("link").setLink({ href: url }).run();
 }
 function insertHr() {
-	run((e) => e.chain().focus().setHorizontalRule().run());
+	run(() => !!editor?.chain().focus().setHorizontalRule().run());
 }
 function insertTable() {
-	run((e) =>
-		e.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run(),
+	run(() =>
+		!!editor
+			?.chain()
+			.focus()
+			.insertTable({ rows: 3, cols: 3, withHeaderRow: true })
+			.run(),
 	);
 }
+/** 表格行列：用 commands 直接派发，避免 chain().focus() 冲掉选区 */
 function addColBefore() {
-	run((e) => e.chain().focus().addColumnBefore().run());
+	run(() => !!editor?.commands.addColumnBefore(), { keepCellSelection: true });
 }
 function addColAfter() {
-	run((e) => e.chain().focus().addColumnAfter().run());
+	run(() => !!editor?.commands.addColumnAfter(), { keepCellSelection: true });
 }
 function delCol() {
-	run((e) => e.chain().focus().deleteColumn().run());
+	run(() => !!editor?.commands.deleteColumn(), { keepCellSelection: true });
 }
 function addRowBefore() {
-	run((e) => e.chain().focus().addRowBefore().run());
+	run(() => !!editor?.commands.addRowBefore(), { keepCellSelection: true });
 }
 function addRowAfter() {
-	run((e) => e.chain().focus().addRowAfter().run());
+	run(() => !!editor?.commands.addRowAfter(), { keepCellSelection: true });
 }
 function delRow() {
-	run((e) => e.chain().focus().deleteRow().run());
+	run(() => !!editor?.commands.deleteRow(), { keepCellSelection: true });
 }
 function delTable() {
-	run((e) => e.chain().focus().deleteTable().run());
+	run(() => !!editor?.commands.deleteTable(), { keepCellSelection: true });
 }
 function toggleHeaderRow() {
-	run((e) => e.chain().focus().toggleHeaderRow().run());
+	run(() => !!editor?.commands.toggleHeaderRow(), { keepCellSelection: true });
+}
+
+function canTable(cmd: string): boolean {
+	if (!editor) return false;
+	try {
+		const can = editor.can() as unknown as Record<string, () => boolean>;
+		return typeof can[cmd] === "function" ? !!can[cmd]() : true;
+	} catch {
+		return false;
+	}
 }
 
 export function insertImage(src: string, alt = "图片") {
@@ -343,19 +367,44 @@ export function getMarkdown(): string {
 	return content;
 }
 
+function syncToolbarLayout() {
+	// fixed 工具栏宽度/水平居中对齐编辑器卡片
+	const root = document.querySelector(".admin-tiptap") as HTMLElement | null;
+	const bar = document.getElementById("admin-tiptap-toolbar");
+	if (!root || !bar) return;
+	const rect = root.getBoundingClientRect();
+	bar.style.width = `${Math.min(rect.width, window.innerWidth - 16)}px`;
+	bar.style.left = `${rect.left + rect.width / 2}px`;
+	// 顶栏发布条 + 站点 navbar 大致高度
+	const navH = document.querySelector("#navbar-wrapper")?.getBoundingClientRect().height || 0;
+	const publishH =
+		document.querySelector(".admin-panel .sticky")?.getBoundingClientRect().height || 0;
+	bar.style.top = `${Math.max(navH, 0) + Math.max(publishH, 0) + 8}px`;
+}
+
 onMount(() => {
 	sourceText = content || "";
 	if (mode === "wysiwyg") createEditor();
+	syncToolbarLayout();
+	window.addEventListener("resize", syncToolbarLayout);
+	window.addEventListener("scroll", syncToolbarLayout, { passive: true });
 });
 
 onDestroy(() => {
 	destroyEditor();
+	if (typeof window !== "undefined") {
+		window.removeEventListener("resize", syncToolbarLayout);
+		window.removeEventListener("scroll", syncToolbarLayout);
+	}
 });
 </script>
 
 <div class="admin-tiptap border border-(--btn-regular-bg) rounded-xl bg-(--card-bg)">
-	<!-- 吸顶工具栏：相对视口 sticky，不随正文滚走 -->
-	<div class="admin-tiptap-toolbar sticky top-0 z-20">
+	<!--
+	  工具栏占位：高度固定，真正的条用 fixed 贴视口，避开父级 overflow:hidden 导致 sticky 失效
+	-->
+	<div class="admin-tiptap-toolbar-spacer" aria-hidden="true"></div>
+	<div class="admin-tiptap-toolbar" id="admin-tiptap-toolbar">
 		{#if mode === "wysiwyg"}
 			<button type="button" class="tb" title="粗体" on:click={toggleBold}
 				><b>B</b></button
@@ -385,32 +434,72 @@ onDestroy(() => {
 			<button type="button" class="tb" title="分隔线" on:click={insertHr}>—</button>
 			<span class="sep"></span>
 			<button type="button" class="tb" title="插入表格" on:click={insertTable}>表格</button>
-			{#if inTable}
-				<button type="button" class="tb" title="左侧加列" on:click={addColBefore}>+列左</button>
-				<button type="button" class="tb" title="右侧加列" on:click={addColAfter}>+列右</button>
-				<button type="button" class="tb" title="删除列" on:click={delCol}>−列</button>
-				<button type="button" class="tb" title="上方加行" on:click={addRowBefore}>+行上</button>
-				<button type="button" class="tb" title="下方加行" on:click={addRowAfter}>+行下</button>
-				<button type="button" class="tb" title="删除行" on:click={delRow}>−行</button>
-				<button type="button" class="tb" title="切换表头行" on:click={toggleHeaderRow}
-					>表头</button
-				>
-				<button type="button" class="tb danger" title="删除整表" on:click={delTable}
-					>删表</button
-				>
-			{/if}
+			<!-- 表格操作始终显示；不可用时 disabled，避免 inTable 检测失败导致“没有增删” -->
+			<button
+				type="button"
+				class="tb"
+				title="左侧加列（光标先点进表格单元格）"
+				disabled={mode === "wysiwyg" && !canTable("addColumnBefore")}
+				on:click={addColBefore}>+列左</button
+			>
+			<button
+				type="button"
+				class="tb"
+				title="右侧加列"
+				disabled={mode === "wysiwyg" && !canTable("addColumnAfter")}
+				on:click={addColAfter}>+列右</button
+			>
+			<button
+				type="button"
+				class="tb"
+				title="删除列"
+				disabled={mode === "wysiwyg" && !canTable("deleteColumn")}
+				on:click={delCol}>−列</button
+			>
+			<button
+				type="button"
+				class="tb"
+				title="上方加行"
+				disabled={mode === "wysiwyg" && !canTable("addRowBefore")}
+				on:click={addRowBefore}>+行上</button
+			>
+			<button
+				type="button"
+				class="tb"
+				title="下方加行"
+				disabled={mode === "wysiwyg" && !canTable("addRowAfter")}
+				on:click={addRowAfter}>+行下</button
+			>
+			<button
+				type="button"
+				class="tb"
+				title="删除行"
+				disabled={mode === "wysiwyg" && !canTable("deleteRow")}
+				on:click={delRow}>−行</button
+			>
+			<button
+				type="button"
+				class="tb"
+				title="切换表头行"
+				disabled={mode === "wysiwyg" && !canTable("toggleHeaderRow")}
+				on:click={toggleHeaderRow}>表头</button
+			>
+			<button
+				type="button"
+				class="tb danger"
+				title="删除整表"
+				disabled={mode === "wysiwyg" && !canTable("deleteTable")}
+				on:click={delTable}>删表</button
+			>
 		{:else}
 			<span class="text-xs text-(--content-meta) px-2">源码模式：直接编辑 Markdown</span>
 		{/if}
 		<div class="flex-1"></div>
 		<button
 			type="button"
-			class="tb {showToc ? 'active' : ''}"
+			class="tb {tocPanelOpen ? 'active' : ''}"
 			title="目录"
-			on:click={() => {
-				showToc = !showToc;
-				if (showToc) tocPanelOpen = true;
-			}}>目录</button
+			on:click={() => (tocPanelOpen = !tocPanelOpen)}>目录</button
 		>
 		<button
 			type="button"
@@ -424,8 +513,7 @@ onDestroy(() => {
 		>
 	</div>
 
-	<!-- 正文区：仅内容滚动；目录为悬浮面板，不占横向挤编辑区 -->
-	<div class="admin-tiptap-body relative" style="min-height: {minHeight}">
+	<div class="admin-tiptap-body" style="min-height: {minHeight}">
 		{#if mode === "wysiwyg"}
 			<div bind:this={hostEl} class="admin-tiptap-host" style="min-height: {minHeight}"></div>
 		{:else}
@@ -437,51 +525,41 @@ onDestroy(() => {
 				spellcheck="false"
 			></textarea>
 		{/if}
+	</div>
+</div>
 
-		{#if showToc}
-			<!-- 仿前端 FloatingTOC：右下角按钮 + 浮层面板 -->
-			<div class="admin-toc-float">
-				<button
-					type="button"
-					class="admin-toc-fab"
-					aria-label="目录"
-					title="目录"
-					on:click={() => (tocPanelOpen = !tocPanelOpen)}
-				>
-					{tocPanelOpen ? "×" : "≡"}
-				</button>
-				{#if tocPanelOpen}
-					<div class="admin-toc-panel">
-						<div class="admin-toc-panel-title">目录</div>
-						<div class="toc-scroll-container admin-toc-scroll">
-							{#if toc.length === 0}
-								<div class="text-xs text-(--content-meta) px-2 py-2">暂无标题</div>
-							{:else}
-								<div class="toc-content">
-									{#each toc as item, i (item.id)}
-										<button
-											type="button"
-											class="toc-item toc-level-{Math.min(item.level, 3)}"
-											title={item.text}
-											on:click={() => scrollToHeading(item)}
-										>
-											<span class="toc-badge toc-badge-index">{i + 1}</span>
-											<span
-												class="toc-label {item.level <= 2
-													? 'toc-label-primary'
-													: 'toc-label-secondary'}">{item.text}</span
-											>
-										</button>
-									{/each}
-								</div>
-							{/if}
-						</div>
+<!-- 目录：fixed 视口右下，仿 FloatingTOC，不依赖父级 overflow -->
+{#if tocPanelOpen}
+	<div class="admin-toc-layer" role="dialog" aria-label="文章目录">
+		<div class="admin-toc-panel">
+			<div class="admin-toc-panel-head">
+				<span>目录</span>
+				<button type="button" class="tb" on:click={() => (tocPanelOpen = false)}>×</button>
+			</div>
+			<div class="admin-toc-scroll">
+				{#if toc.length === 0}
+					<div class="text-xs text-(--content-meta) px-3 py-3">
+						暂无标题。用工具栏 H1/H2/H3 添加标题后会出现在这里。
+					</div>
+				{:else}
+					<div class="admin-toc-list">
+						{#each toc as item, i (item.id)}
+							<button
+								type="button"
+								class="admin-toc-item level-{Math.min(item.level, 3)}"
+								title={item.text}
+								on:click={() => scrollToHeading(item)}
+							>
+								<span class="admin-toc-idx">{i + 1}</span>
+								<span class="admin-toc-text">{item.text}</span>
+							</button>
+						{/each}
 					</div>
 				{/if}
 			</div>
-		{/if}
+		</div>
 	</div>
-</div>
+{/if}
 
 <style>
 	.admin-tiptap {
@@ -516,20 +594,31 @@ onDestroy(() => {
 		--admin-heading-fg: #0f172a;
 	}
 
+	/* 站点 .card-base 有 overflow:hidden，sticky 会失效 → 工具栏改 fixed */
+	.admin-tiptap-toolbar-spacer {
+		height: 3.25rem; /* 与 fixed 工具栏大致等高，避免正文被挡住 */
+	}
 	.admin-tiptap-toolbar {
+		position: fixed;
+		/* 顶栏发布条下方；窄屏略低 */
+		top: 4.5rem;
+		left: 50%;
+		transform: translateX(-50%);
+		width: min(72rem, calc(100vw - 1.5rem));
+		z-index: 60;
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
 		gap: 0.25rem;
-		padding: 0.4rem 0.5rem;
-		border-bottom: 1px solid var(--btn-regular-bg);
-		/* 半透明 + 模糊，滚动时仍可读 */
-		background: color-mix(in srgb, var(--card-bg) 92%, transparent);
-		backdrop-filter: blur(10px);
-		-webkit-backdrop-filter: blur(10px);
-		/* 顶栏下方；列表页 sticky 发布条约 3rem，这里略高一点 */
-		top: 0.25rem;
-		box-shadow: 0 1px 0 color-mix(in srgb, var(--btn-regular-bg) 80%, transparent);
+		padding: 0.45rem 0.6rem;
+		border: 1px solid color-mix(in srgb, var(--btn-regular-bg) 90%, transparent);
+		border-radius: 0.75rem;
+		background: color-mix(in srgb, var(--card-bg) 94%, transparent);
+		backdrop-filter: blur(12px);
+		-webkit-backdrop-filter: blur(12px);
+		box-shadow: 0 10px 30px -18px rgba(0, 0, 0, 0.45);
+		max-height: 40vh;
+		overflow-y: auto;
 	}
 
 	.tb {
@@ -541,8 +630,12 @@ onDestroy(() => {
 		border: 1px solid transparent;
 		line-height: 1.2;
 	}
-	.tb:hover {
+	.tb:hover:not(:disabled) {
 		background: var(--btn-regular-bg);
+	}
+	.tb:disabled {
+		opacity: 0.35;
+		cursor: not-allowed;
 	}
 	.tb.active {
 		background: color-mix(in srgb, var(--primary) 18%, transparent);
@@ -564,9 +657,10 @@ onDestroy(() => {
 
 	.admin-tiptap-body {
 		position: relative;
+		/* 必须 visible：父级 card-base 已 overflow hidden，这里再 hidden 会雪上加霜 */
+		overflow: visible;
 	}
 	.admin-tiptap-host {
-		/* 正文自然增高，页面滚动；工具栏 sticky 不跟着走 */
 		overflow: visible;
 	}
 	.admin-source-area {
@@ -582,136 +676,94 @@ onDestroy(() => {
 		resize: vertical;
 	}
 
-	/* 悬浮目录 */
-	.admin-toc-float {
-		position: sticky;
+	/* 目录：fixed 视口，仿前端悬浮 TOC */
+	.admin-toc-layer {
+		position: fixed;
+		right: 1rem;
 		bottom: 1.25rem;
-		float: right;
-		clear: both;
-		z-index: 30;
+		z-index: 70;
 		display: flex;
 		flex-direction: column;
 		align-items: flex-end;
 		gap: 0.5rem;
 		pointer-events: none;
-		margin: -3.5rem 0.75rem 0.75rem 0;
-		height: 0;
 	}
-	.admin-toc-fab,
 	.admin-toc-panel {
 		pointer-events: auto;
-	}
-	.admin-toc-fab {
-		width: 2.5rem;
-		height: 2.5rem;
-		border-radius: 999px;
-		border: 1px solid color-mix(in srgb, var(--btn-regular-bg) 80%, transparent);
-		background: color-mix(in srgb, var(--card-bg) 90%, transparent);
-		backdrop-filter: blur(10px);
-		color: var(--btn-content);
-		font-size: 1.15rem;
-		line-height: 1;
-		box-shadow: 0 8px 24px -12px rgba(0, 0, 0, 0.35);
-		display: grid;
-		place-items: center;
-		margin-left: auto;
-	}
-	.admin-toc-panel {
 		width: min(18rem, calc(100vw - 2rem));
-		max-height: min(24rem, 50vh);
-		overflow: hidden;
-		border-radius: 1rem;
-		border: 1px solid color-mix(in srgb, var(--btn-regular-bg) 90%, transparent);
-		background: color-mix(in srgb, var(--card-bg) 94%, transparent);
-		backdrop-filter: blur(14px);
-		box-shadow: 0 16px 40px -20px rgba(0, 0, 0, 0.45);
-		padding: 0.5rem 0 0.35rem;
-	}
-	.admin-toc-panel-title {
-		font-size: 0.75rem;
-		font-weight: 700;
-		color: var(--content-meta);
-		padding: 0 0.85rem 0.35rem;
-	}
-	.admin-toc-scroll {
-		max-height: min(20rem, 42vh);
-		padding: 0 0.45rem 0.45rem;
-	}
-
-	/* 复用前端 toc 视觉 token（无全局变量时兜底） */
-	.admin-toc-panel {
-		--toc-btn-hover: color-mix(in srgb, var(--btn-regular-bg) 70%, transparent);
-		--toc-btn-active: color-mix(in srgb, var(--primary) 12%, transparent);
-		--toc-badge-bg: color-mix(in srgb, var(--btn-regular-bg) 80%, var(--primary) 8%);
-		--toc-indicator-bg: color-mix(in srgb, var(--primary) 10%, transparent);
-		--line-color: var(--btn-regular-bg);
-	}
-
-	/* 目录条目（对齐 toc.css 语义） */
-	:global(.admin-toc-panel .toc-scroll-container) {
-		overflow-y: auto;
-		overscroll-behavior: contain;
-	}
-	:global(.admin-toc-panel .toc-content) {
+		max-height: min(26rem, 55vh);
 		display: flex;
 		flex-direction: column;
-		gap: 0.28rem;
-		position: relative;
+		border-radius: 1rem;
+		border: 1px solid color-mix(in srgb, var(--btn-regular-bg) 90%, transparent);
+		background: color-mix(in srgb, var(--card-bg) 96%, transparent);
+		backdrop-filter: blur(14px);
+		box-shadow: 0 16px 40px -18px rgba(0, 0, 0, 0.5);
+		overflow: hidden;
 	}
-	:global(.admin-toc-panel .toc-item) {
+	.admin-toc-panel-head {
 		display: flex;
 		align-items: center;
-		gap: 0.55rem;
+		justify-content: space-between;
+		padding: 0.55rem 0.65rem 0.35rem 0.9rem;
+		font-size: 0.8rem;
+		font-weight: 700;
+		color: var(--content-meta);
+		border-bottom: 1px solid color-mix(in srgb, var(--btn-regular-bg) 80%, transparent);
+	}
+	.admin-toc-scroll {
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		padding: 0.4rem 0.45rem 0.55rem;
+		max-height: min(22rem, 48vh);
+	}
+	.admin-toc-list {
+		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+	}
+	.admin-toc-item {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
 		width: 100%;
 		border: 0;
 		background: transparent;
-		border-radius: 0.875rem;
-		padding: 0.48rem 0.62rem;
-		min-height: 2.2rem;
+		border-radius: 0.75rem;
+		padding: 0.42rem 0.55rem;
 		cursor: pointer;
-		color: inherit;
 		text-align: left;
-	}
-	:global(.admin-toc-panel .toc-item:hover) {
-		background: var(--toc-btn-hover);
-	}
-	:global(.admin-toc-panel .toc-item.toc-level-1) {
-		padding-left: 0.62rem;
-	}
-	:global(.admin-toc-panel .toc-item.toc-level-2) {
-		padding-left: 1.1rem;
-	}
-	:global(.admin-toc-panel .toc-item.toc-level-3) {
-		padding-left: 1.5rem;
-	}
-	:global(.admin-toc-panel .toc-badge) {
-		display: grid;
-		place-items: center;
-		flex-shrink: 0;
-		width: 1.35rem;
-		height: 1.35rem;
-		border-radius: 0.5rem;
-		font-size: 0.68rem;
-		font-weight: 700;
-	}
-	:global(.admin-toc-panel .toc-badge-index) {
-		background: var(--toc-badge-bg);
 		color: var(--btn-content);
 	}
-	:global(.admin-toc-panel .toc-label) {
+	.admin-toc-item:hover {
+		background: color-mix(in srgb, var(--btn-regular-bg) 75%, transparent);
+	}
+	.admin-toc-item.level-2 {
+		padding-left: 1.1rem;
+	}
+	.admin-toc-item.level-3 {
+		padding-left: 1.55rem;
+	}
+	.admin-toc-idx {
+		flex-shrink: 0;
+		width: 1.3rem;
+		height: 1.3rem;
+		border-radius: 0.45rem;
+		display: grid;
+		place-items: center;
+		font-size: 0.68rem;
+		font-weight: 700;
+		background: color-mix(in srgb, var(--btn-regular-bg) 80%, var(--primary) 10%);
+		color: var(--btn-content);
+	}
+	.admin-toc-text {
+		min-width: 0;
+		flex: 1;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		min-width: 0;
-		flex: 1;
 		font-size: 0.86rem;
 		line-height: 1.3;
-	}
-	:global(.admin-toc-panel .toc-label-primary) {
-		color: color-mix(in srgb, var(--content-meta) 40%, var(--btn-content));
-	}
-	:global(.admin-toc-panel .toc-label-secondary) {
-		color: var(--content-meta);
 	}
 
 	:global(.admin-tiptap-host .tiptap) {
