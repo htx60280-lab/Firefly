@@ -97,6 +97,9 @@ let saveOk = false;
 
 let imgUploading = false;
 let imgMsg = "";
+let mdUploading = false;
+let mdUploadMsg = "";
+let mdFileInput: HTMLInputElement | null = null;
 let tagsInput = "";
 let newTagDraft = "";
 let bodyEl: HTMLTextAreaElement | null = null;
@@ -547,6 +550,175 @@ function discardAllStaging() {
 	clearStaging();
 	publishMsg = "已清空暂存";
 	publishOk = true;
+}
+
+// ===================== 上传 .md 导入 =====================
+/** 与后端 frontmatter 解析规则对齐（客户端轻量实现） */
+function stripQuotesLocal(s: string): string {
+	let v = s.trim();
+	for (let i = 0; i < 3; i++) {
+		if (
+			(v.startsWith('"') && v.endsWith('"') && v.length >= 2) ||
+			(v.startsWith("'") && v.endsWith("'") && v.length >= 2)
+		) {
+			v = v
+				.slice(1, -1)
+				.replace(/\\"/g, '"')
+				.replace(/\\'/g, "'")
+				.trim();
+			continue;
+		}
+		break;
+	}
+	return v;
+}
+
+function parseMdFile(raw: string): {
+	fm: Record<string, unknown>;
+	body: string;
+} {
+	const m = raw.match(/^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/);
+	if (!m) return { fm: {}, body: raw };
+	const out: Record<string, unknown> = {};
+	for (const line of m[1].split("\n")) {
+		const mm = line.match(/^([a-zA-Z_]+):\s*(.*)$/);
+		if (!mm) continue;
+		const [, k, vRaw] = mm;
+		let v = vRaw.trim();
+		if (v === "") {
+			out[k] = "";
+			continue;
+		}
+		if (v.startsWith("[") && v.endsWith("]")) {
+			const inner = v.slice(1, -1).trim();
+			out[k] = inner
+				? inner
+						.split(",")
+						.map((s) => stripQuotesLocal(s.trim()))
+						.filter(Boolean)
+				: [];
+			continue;
+		}
+		v = stripQuotesLocal(v);
+		if (v === "true") {
+			out[k] = true;
+			continue;
+		}
+		if (v === "false") {
+			out[k] = false;
+			continue;
+		}
+		out[k] = v;
+	}
+	return { fm: out, body: m[2] };
+}
+
+function nameFromFile(fileName: string, title: string): string {
+	const base = fileName.replace(/\.mdx?$/i, "").trim();
+	let slug = base
+		.toLowerCase()
+		.replace(/[^a-z0-9-]+/g, "-")
+		.replace(/-+/g, "-")
+		.replace(/^-|-$/g, "");
+	if (!slug) slug = slugify(title);
+	if (!slug) slug = `post-${Date.now().toString(36)}`;
+	return `${slug.slice(0, 60)}.md`;
+}
+
+function stageFromParsed(
+	fileName: string,
+	raw: string,
+): { ok: true; name: string } | { ok: false; error: string } {
+	const { fm: f, body: articleBody } = parseMdFile(raw);
+	const title = str(f.title, fileName.replace(/\.mdx?$/i, ""));
+	if (!title.trim()) return { ok: false, error: "缺少 title" };
+	const bodyText = (articleBody ?? "").trim();
+	if (!bodyText) return { ok: false, error: "正文为空" };
+	const name = nameFromFile(fileName, title);
+	const tags = arr(f.tags);
+	upsertStage({
+		op: "upsert",
+		name,
+		title: title.trim(),
+		published: str(f.published, today()),
+		updated: str(f.updated, today()),
+		draft: bool(f.draft, false),
+		description: str(f.description, ""),
+		image: str(f.image, ""),
+		tags,
+		category: str(f.category, ""),
+		lang: str(f.lang, ""),
+		pinned: bool(f.pinned, false),
+		author: str(f.author, ""),
+		sourceLink: str(f.sourceLink, ""),
+		licenseName: str(f.licenseName, ""),
+		licenseUrl: str(f.licenseUrl, ""),
+		comment: bool(f.comment, true),
+		password: str(f.password, ""),
+		passwordHint: str(f.passwordHint, ""),
+		body: bodyText,
+		stagedAt: Date.now(),
+	});
+	if (str(f.category, "") && !knownCategories.includes(str(f.category, ""))) {
+		knownCategories = [...knownCategories, str(f.category, "")].sort((a, b) =>
+			a.localeCompare(b, "zh"),
+		);
+	}
+	for (const t of tags) {
+		if (!knownTags.includes(t))
+			knownTags = [...knownTags, t].sort((a, b) => a.localeCompare(b, "zh"));
+	}
+	return { ok: true, name };
+}
+
+async function onMdFilesPick(e: Event) {
+	const input = e.target as HTMLInputElement;
+	const files = input.files ? Array.from(input.files) : [];
+	input.value = "";
+	if (!files.length) return;
+
+	mdUploading = true;
+	mdUploadMsg = "导入中…";
+	const okNames: string[] = [];
+	const errors: string[] = [];
+
+	for (const file of files) {
+		if (!/\.mdx?$/i.test(file.name)) {
+			errors.push(`${file.name}：仅支持 .md / .mdx`);
+			continue;
+		}
+		if (file.size > 2_000_000) {
+			errors.push(`${file.name}：超过 2MB`);
+			continue;
+		}
+		try {
+			const raw = await file.text();
+			const r = stageFromParsed(file.name, raw);
+			if (r.ok) okNames.push(r.name);
+			else errors.push(`${file.name}：${r.error}`);
+		} catch (err) {
+			errors.push(`${file.name}：${(err as Error).message}`);
+		}
+	}
+
+	mdUploading = false;
+	if (okNames.length && !errors.length) {
+		publishOk = true;
+		mdUploadMsg = `已导入 ${okNames.length} 篇到暂存：${okNames.join("、")}。点「发布全部」才推送到 GitHub。`;
+		publishMsg = mdUploadMsg;
+	} else if (okNames.length) {
+		publishOk = true;
+		mdUploadMsg = `成功 ${okNames.length} 篇；失败 ${errors.length}：${errors.join("；")}`;
+		publishMsg = mdUploadMsg;
+	} else {
+		publishOk = false;
+		mdUploadMsg = errors.join("；") || "导入失败";
+		publishMsg = mdUploadMsg;
+	}
+}
+
+function openMdPicker() {
+	mdFileInput?.click();
 }
 
 // ===================== 编辑 =====================
@@ -1005,6 +1177,21 @@ $: if (view === "edit") loadMarked();
 						>写文章</button
 					>
 					<button
+						type="button"
+						on:click={openMdPicker}
+						disabled={mdUploading}
+						class="px-3 py-1.5 rounded-lg bg-(--btn-regular-bg) text-(--btn-content) text-sm font-semibold disabled:opacity-60"
+						>{mdUploading ? "导入中…" : "上传 MD"}</button
+					>
+					<input
+						bind:this={mdFileInput}
+						type="file"
+						accept=".md,.mdx,text/markdown,text/x-markdown"
+						multiple
+						class="hidden"
+						on:change={onMdFilesPick}
+					/>
+					<button
 						on:click={logout}
 						class="px-3 py-1.5 rounded-lg bg-(--btn-regular-bg) text-(--btn-content) text-sm"
 						>退出</button
@@ -1018,6 +1205,9 @@ $: if (view === "edit") loadMarked();
 					placeholder="搜索标题 / 文件名 / 分类 / 标签..."
 					class="w-full px-3 py-2 rounded-lg border border-(--btn-regular-bg) bg-(--card-bg) text-(--btn-content) text-sm"
 				/>
+				<p class="text-xs text-(--content-meta)">
+					「上传 MD」支持多选 .md/.mdx，解析 frontmatter 后进入暂存，不会立刻 push；确认后点顶部「发布全部」。
+				</p>
 				<div class="flex flex-wrap items-center gap-2 text-sm">
 					<label class="flex items-center gap-1.5 text-(--btn-content) cursor-pointer">
 						<input type="checkbox" checked={allSelected} on:change={toggleSelectAll} />
