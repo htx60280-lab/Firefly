@@ -162,11 +162,12 @@ CF dashboard → Workers & Pages → 选择 firefly 项目 → Settings → Buil
 
 同一项目 → Settings → Variables and Secrets（运行时密钥，和第一步构建变量区分开），添加**加密类型**密钥
 
-| Secret 名称 | 填写内容 | 是否必填 |     |
-| --- | --- | --- | --- |
-| ADMIN\_PASSWORD | 自定义后台登录密码（建议高强度密码） | ✅ 必填 |     |
-| GH\_TOKEN | GitHub 细粒度个人访问令牌（获取方式见第4步） | ✅ 必填 | **获取见第3步** |
-| GH\_BRANCH | master（仓库默认分支，不配置无法读取文章） | ✅ 必填 |     |
+| Secret 名称 | 填写内容 | 是否必填 |
+| --- | --- | --- |
+| ADMIN\_PASSWORD | 自定义后台登录密码（建议高强度密码） | ✅ 必填 |
+| GH\_TOKEN | GitHub 细粒度个人访问令牌（获取方式见第3步） | ✅ 必填 |
+| GH\_BRANCH | master（仓库默认分支，不配置无法读取文章） | ✅ 必填 |
+|     |     |     |
 
 **第 3步：获取 GitHub PAT 令牌（GH\_TOKEN）**
 
