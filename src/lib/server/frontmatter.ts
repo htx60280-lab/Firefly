@@ -45,15 +45,21 @@ export function stripQuotes(s: string): string {
 	return v;
 }
 
-/** YAML 标量：仅在必要时加双引号（含特殊字符 / 空格首尾 / 布尔字面量） */
+/** YAML 标量：仅在必要时加双引号。日期 YYYY-MM-DD 必须裸写，否则 Astro z.date() 会当 string 拒收。 */
 export function yamlScalar(s: string): string {
 	const v = stripQuotes(s);
 	if (v === "") return '""';
-	// 避免把 true/false/null 等写成裸字面量导致解析成布尔
+	// ISO 日期：裸写，让 YAML/Astro 解析为 Date
+	if (DATE_RE.test(v)) return v;
+	// 避免 true/false/null 等写成裸字面量
 	if (/^(true|false|null|yes|no|on|off)$/i.test(v)) {
 		return `"${v}"`;
 	}
-	if (/[:#&*!|>'"%@`{}[\],\n\\]/.test(v) || v.trim() !== v || /^\d/.test(v)) {
+	// 纯数字（非日期）加引号，避免被解析成 number
+	if (/^\d+(\.\d+)?$/.test(v)) {
+		return `"${v}"`;
+	}
+	if (/[:#&*!|>'"%@`{}[\],\n\\]/.test(v) || v.trim() !== v) {
 		return `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 	}
 	return v;
@@ -82,12 +88,14 @@ export function serializeFrontmatter(input: ArticleFields): string {
 	};
 
 	push("title", (input.title ?? "").trim() || "Untitled");
-	push(
-		"published",
-		DATE_RE.test(input.published ?? "") ? input.published : today,
-	);
-	if (input.updated && DATE_RE.test(input.updated))
-		push("updated", input.updated);
+	// 日期字段强制裸写 YYYY-MM-DD（不走可能误加引号的路径）
+	const published = DATE_RE.test(input.published ?? "")
+		? stripQuotes(input.published ?? "")
+		: today;
+	fields.push(["published", published]);
+	if (input.updated && DATE_RE.test(stripQuotes(input.updated))) {
+		fields.push(["updated", stripQuotes(input.updated)]);
+	}
 	push("draft", input.draft ?? false);
 	push("description", input.description ?? "");
 	push("image", input.image ?? "");

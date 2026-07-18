@@ -1,7 +1,7 @@
 ---
-title: "Hello, Wind"
-published: "2026-07-16"
-updated: "2026-07-18"
+title: Hello, Wind
+published: 2026-07-16
+updated: 2026-07-18
 draft: false
 description: 博客的第一篇占位文章 —— 风起于此。
 image: ""
