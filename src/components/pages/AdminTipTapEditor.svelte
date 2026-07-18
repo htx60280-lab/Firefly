@@ -177,7 +177,7 @@ function bindHeadingScrollSpy() {
 		{
 			root: null,
 			// 顶部为吸顶工具栏留白，底部放宽
-			rootMargin: "-80px 0px -55% 0px",
+			rootMargin: "-140px 0px -55% 0px",
 			threshold: [0, 0.1, 0.5, 1],
 		},
 	);
@@ -308,6 +308,17 @@ function onSourceInput() {
 	toc = parseMdToc(sourceText);
 }
 
+function stickyOffsetPx(): number {
+	// stickyNavbar + 发布顶栏 + 正文工具栏
+	const stickyNav = typeof document !== "undefined" && document.body.classList.contains("sticky-navbar");
+	const nav = stickyNav ? 76 : 8;
+	const topbar = document.querySelector(".admin-topbar") as HTMLElement | null;
+	const tb = topbar?.offsetHeight || 0;
+	const toolbar = document.querySelector(".admin-tiptap-toolbar") as HTMLElement | null;
+	const th = toolbar?.offsetHeight || 56;
+	return nav + tb + th + 8;
+}
+
 function scrollToHeading(item: (typeof toc)[0]) {
 	if (mode === "source") return;
 	if (!editor || !hostEl) return;
@@ -317,11 +328,10 @@ function scrollToHeading(item: (typeof toc)[0]) {
 	try {
 		// 优先滚到 DOM 标题（对齐文章页 hash 跳转）
 		const el = hostEl.querySelector<HTMLElement>(`[data-toc-id="${item.id}"]`);
+		const offset = stickyOffsetPx();
 		if (el) {
 			const rect = el.getBoundingClientRect();
 			const scroller = document.scrollingElement || document.documentElement;
-			// 预留：正文区内 sticky 工具栏高度
-			const offset = 72;
 			scroller.scrollTo({
 				top: rect.top + scroller.scrollTop - offset,
 				behavior: "smooth",
@@ -331,7 +341,7 @@ function scrollToHeading(item: (typeof toc)[0]) {
 		const coords = editor.view.coordsAtPos(pos);
 		const scroller = document.scrollingElement || document.documentElement;
 		scroller.scrollTo({
-			top: coords.top + scroller.scrollTop - 72,
+			top: coords.top + scroller.scrollTop - offset,
 			behavior: "smooth",
 		});
 	} catch {
@@ -658,7 +668,7 @@ onDestroy(() => {
 	 */
 	.admin-tiptap-toolbar {
 		position: sticky;
-		top: 0;
+		top: 8.5rem; /* stickyNavbar + 发布顶栏 */
 		z-index: 25;
 		display: flex;
 		flex-wrap: wrap;
@@ -670,6 +680,10 @@ onDestroy(() => {
 		backdrop-filter: blur(12px);
 		-webkit-backdrop-filter: blur(12px);
 		box-shadow: 0 4px 14px -12px rgba(0, 0, 0, 0.4);
+	}
+
+	:global(body:not(.sticky-navbar)) .admin-tiptap-toolbar {
+		top: 4rem; /* 仅发布顶栏 */
 	}
 
 	.tb {
@@ -730,10 +744,13 @@ onDestroy(() => {
 	/* 右侧目录：对齐 SidebarTOC — sticky 随页面滚动，目录自身可滚 */
 	.admin-toc-sidebar {
 		position: sticky;
-		/* 与正文工具栏错开一点，贴在视口上方 */
-		top: 0.75rem;
+		/* stickyNavbar 时与侧栏目录一致，顶在导航下方 */
+		top: 5.5rem;
 		align-self: start;
 		z-index: 10;
+	}
+	:global(body:not(.sticky-navbar)) .admin-toc-sidebar {
+		top: 0.75rem;
 	}
 	.admin-toc-sidebar-inner {
 		border: 1px solid color-mix(in srgb, var(--btn-regular-bg) 90%, transparent);

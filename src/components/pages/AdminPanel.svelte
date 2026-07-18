@@ -1010,7 +1010,7 @@ onMount(async () => {
 	{:else}
 		<!-- 顶栏：发布区（全局） -->
 		<div
-			class="card-base p-3 mb-4 flex flex-wrap items-center justify-between gap-2 sticky top-2 z-20 bg-(--card-bg)/95 backdrop-blur"
+			class="admin-topbar p-3 mb-4 flex flex-wrap items-center justify-between gap-2 sticky top-[4.75rem] z-30 bg-(--card-bg)/95 backdrop-blur rounded-(--radius-large) border border-black/5 dark:border-white/10"
 		>
 			<div class="text-sm text-(--btn-content)">
 				{#if stagingCount > 0}

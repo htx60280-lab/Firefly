@@ -8,7 +8,33 @@ const description = "Volant 管理后台";
 ---
 
 <MainGridLayout title={title} description={description}>
-    <div class="min-h-[80vh]">
-        <AdminPanel client:load />
-    </div>
+	{/*
+	  主内容列默认带 overflow-hidden（responsive-utils），
+	  且 #content-wrapper 有 onload-animation 的 transform，
+	  二者都会让内部 position:sticky 失效。
+	  后台编辑器工具栏/目录依赖 sticky，这里把祖先恢复为可 sticky 的环境。
+	*/}
+	<div class="min-h-[80vh] admin-page-root">
+		<AdminPanel client:load />
+	</div>
 </MainGridLayout>
+
+<style is:global>
+	/*
+	 * sticky 失效的两个根因（线上 chrome 实测）：
+	 * 1) 主内容列 generateMainContentClasses 固定 overflow-hidden
+	 * 2) #content-wrapper.onload-animation 的 transform 形成包含块
+	 */
+	body:has(.admin-page-root) #main-grid > div.min-w-0.overflow-hidden {
+		overflow: visible !important;
+	}
+	body:has(.admin-page-root) #content-wrapper {
+		animation: none !important;
+		transform: none !important;
+		opacity: 1 !important;
+	}
+	/* 发布顶栏：无 stickyNavbar 时贴顶更近 */
+	body:not(.sticky-navbar) .admin-topbar {
+		top: 0.5rem !important;
+	}
+</style>
