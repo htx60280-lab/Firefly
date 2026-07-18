@@ -1,5 +1,9 @@
 import type { APIContext } from "astro";
 import {
+	type ArticleFields,
+	serializeFrontmatter,
+} from "@/lib/server/frontmatter";
+import {
 	GhApiError,
 	type GhEnv,
 	readGhEnv,
@@ -13,105 +17,53 @@ import { json, jsonError } from "@/lib/server/web";
 
 export const prerender = false;
 
-// 文章 frontmatter 校验 schema（与 content.config.ts 对齐，子集 + 校验规则）
-interface ArticleInput {
-	slug?: string;
-	title?: string;
-	published?: string; // YYYY-MM-DD
-	updated?: string;
-	draft?: boolean;
-	description?: string;
-	image?: string;
-	tags?: string[];
-	category?: string;
-	lang?: string;
-	pinned?: boolean;
-	author?: string;
-	sourceLink?: string;
-	licenseName?: string;
-	licenseUrl?: string;
-	comment?: boolean;
-	password?: string;
-	passwordHint?: string;
-	body?: string; // 正文 Markdown（不含 frontmatter）
-	mode?: "create" | "update" | "auto";
-}
-
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-
-function serializeFrontmatter(input: ArticleInput): string {
-	const today = new Date().toISOString().slice(0, 10);
-	const fields: Array<[string, string]> = [];
-	const push = (k: string, v: unknown) => {
-		if (v === undefined || v === null) return;
-		if (typeof v === "string")
-			fields.push([k, v === "" ? '""' : yamlScalar(v)]);
-		else if (typeof v === "boolean" || typeof v === "number")
-			fields.push([k, String(v)]);
-		else if (Array.isArray(v))
-			fields.push([k, v.length ? `[${v.map(yamlScalar).join(", ")}]` : "[]"]);
-	};
-	push("title", (input.title ?? "").trim() || "Untitled");
-	push(
-		"published",
-		DATE_RE.test(input.published ?? "") ? input.published : today,
-	);
-	push("updated", input.updated);
-	push("draft", input.draft);
-	push("description", input.description);
-	push("image", input.image);
-	push("tags", input.tags);
-	push("category", input.category);
-	push("lang", input.lang);
-	push("pinned", input.pinned);
-	push("author", input.author);
-	push("sourceLink", input.sourceLink);
-	push("licenseName", input.licenseName);
-	push("licenseUrl", input.licenseUrl);
-	push("comment", input.comment);
-	push("password", input.password);
-	push("passwordHint", input.passwordHint);
-	return (
-		"---\n" + fields.map(([k, v]) => `${k}: ${v}`).join("\n") + "\n---\n\n"
-	);
-}
-
-/** YAML 标量序列化：含特殊字符的字符串加引号转义，防注入 */
-function yamlScalar(s: string): string {
-	if (/[:#&*!|>'"%@`{}[\],\n]/.test(s) || s.trim() !== s) {
-		return '"' + s.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
-	}
-	return s;
+/** 中文/任意标题 → 可用 slug（优先拉丁，失败用时间戳） */
+function slugify(raw: string): string {
+	const s = raw
+		.trim()
+		.toLowerCase()
+		// 保留中日韩、字母数字，其余转 -
+		.replace(/[^\p{L}\p{N}]+/gu, "-")
+		.replace(/^-+|-+$/g, "")
+		// 文件名仅允许 a-z0-9-：把非 ascii 转成短 hash 后缀
+		.replace(/[^a-z0-9-]/g, "");
+	if (s && s.length >= 2) return s.slice(0, 60);
+	// 纯中文标题：用 post-时间戳
+	const stamp = Date.now().toString(36);
+	return `post-${stamp}`;
 }
 
 export async function POST(context: APIContext) {
-	// 鉴权
 	const guard = await requireAuth(context);
 	if (!isAllowed(guard)) return guard;
 
-	let input: ArticleInput;
+	let input: ArticleFields;
 	try {
-		input = (await context.request.json()) as ArticleInput;
+		input = (await context.request.json()) as ArticleFields;
 	} catch {
 		return jsonError(400, "请求体不是合法 JSON");
 	}
 
-	// 基本校验
 	const title = (input.title ?? "").trim();
 	if (!title) return jsonError(400, "缺少 title");
 	const body = (input.body ?? "").trim();
 	if (body.length < 1) return jsonError(400, "正文不能为空");
 	if (body.length > 2_000_000) return jsonError(400, "正文过大（>2MB）");
 
-	// slug 规范化
-	const slugRaw = (input.slug ?? title).trim();
-	if (slugRaw.length === 0) return jsonError(400, "缺少 slug");
+	// slug：优先用客户端给的（编辑态锁定），否则从标题推
+	let slugRaw = (input.slug ?? "").trim().toLowerCase().replace(/\.md$/i, "");
+	if (!slugRaw) slugRaw = slugify(title);
+	// 再规范化一次，只留 a-z0-9-
+	slugRaw = slugRaw
+		.replace(/[^a-z0-9-]/g, "-")
+		.replace(/-+/g, "-")
+		.replace(/^-|-$/g, "");
+	if (!slugRaw) return jsonError(400, "slug 为空，请手动指定文件名");
 	if (!/^[a-z0-9-]+$/.test(slugRaw)) {
 		return jsonError(400, "slug 仅允许小写字母、数字、连字符");
 	}
-	const filename = slugRaw.replace(/\.md$/i, "") + ".md";
+	const filename = `${slugRaw}.md`;
 
-	// 模式判定
 	let env: GhEnv;
 	try {
 		env = await readGhEnv();
@@ -145,8 +97,19 @@ export async function POST(context: APIContext) {
 		return jsonError(500, "查询文章失败", msg);
 	}
 
-	// 拼装最终内容：frontmatter + body
-	const content = serializeFrontmatter(input) + body + "\n";
+	// 保存时自动补 updated（编辑）
+	const fields: ArticleFields = {
+		...input,
+		title,
+		// tags/category 清理空白
+		tags: (input.tags ?? []).map((t) => String(t).trim()).filter(Boolean),
+		category: (input.category ?? "").trim(),
+	};
+	if (mode === "update" && !fields.updated) {
+		fields.updated = new Date().toISOString().slice(0, 10);
+	}
+
+	const content = serializeFrontmatter(fields) + body + "\n";
 
 	let writeResult: WriteResult;
 	try {
@@ -165,7 +128,6 @@ export async function POST(context: APIContext) {
 		return jsonError(status, msg, detail);
 	}
 
-	// 触发重建（失败不阻断）
 	const hook = await triggerRedeploy(env);
 
 	return json(

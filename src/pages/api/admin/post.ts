@@ -1,64 +1,17 @@
 import type { APIContext } from "astro";
+import { splitArticle } from "@/lib/server/frontmatter";
 import {
 	deletePost,
 	GhApiError,
 	type GhEnv,
 	readGhEnv,
 	readPost,
+	triggerRedeploy,
 } from "@/lib/server/github";
 import { isAllowed, requireAuth } from "@/lib/server/guard";
 import { json, jsonError } from "@/lib/server/web";
 
 export const prerender = false;
-
-/** 极简 frontmatter 解析：仅识别 `key: value` 与 `key: [a, b]`，值含特殊字符时去引号 */
-function parseFrontmatter(fm: string): Record<string, unknown> {
-	const out: Record<string, unknown> = {};
-	for (const line of fm.split("\n")) {
-		const m = line.match(/^([a-zA-Z_]+):\s*(.*)$/);
-		if (!m) continue;
-		const [, k, vRaw] = m;
-		let v = vRaw.trim();
-		if (v === "") {
-			out[k] = "";
-			continue;
-		}
-		// 去双引号
-		if (v.startsWith('"') && v.endsWith('"'))
-			v = v.slice(1, -1).replace(/\\"/g, '"');
-		// 数组
-		if (v.startsWith("[") && v.endsWith("]")) {
-			const inner = v.slice(1, -1).trim();
-			out[k] = inner
-				? inner
-						.split(",")
-						.map((s) => s.trim().replace(/^"|"$/g, ""))
-						.filter(Boolean)
-				: [];
-			continue;
-		}
-		if (v === "true") {
-			out[k] = true;
-			continue;
-		}
-		if (v === "false") {
-			out[k] = false;
-			continue;
-		}
-		out[k] = v;
-	}
-	return out;
-}
-
-/** 把整篇 .md 拆成 { frontmatter, body } */
-function splitArticle(raw: string): {
-	fm: Record<string, unknown>;
-	body: string;
-} {
-	const m = raw.match(/^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/);
-	if (!m) return { fm: {}, body: raw };
-	return { fm: parseFrontmatter(m[1]), body: m[2] };
-}
 
 /** GET：读单篇，回填编辑器 */
 export async function GET(context: APIContext) {
@@ -86,7 +39,6 @@ export async function GET(context: APIContext) {
 	}
 	if (!file) return jsonError(404, "文章不存在");
 
-	// 返回原文 + 解析后的 frontmatter + sha（更新时需要）
 	const { fm, body } = splitArticle(file.content);
 	return json({
 		name,
@@ -102,12 +54,11 @@ export async function DELETE(context: APIContext) {
 	const guard = await requireAuth(context);
 	if (!isAllowed(guard)) return guard;
 
-	let payload: { name?: string; sha?: string } = {};
+	let payload: { name?: string; sha?: string; redeploy?: boolean } = {};
 	const m = context.url.searchParams;
 	const name = m.get("name") || "";
 	const sha = m.get("sha") || "";
 	if (!name || !sha) {
-		// 没有 query 就尝试读 body
 		try {
 			payload = await context.request.json();
 		} catch {
@@ -134,5 +85,12 @@ export async function DELETE(context: APIContext) {
 		const status = e instanceof GhApiError && e.status ? e.status : 502;
 		return jsonError(status, msg, detail);
 	}
-	return json({ ok: true });
+
+	// 默认触发重建；客户端可传 redeploy=false 批量时只最后一次触发
+	const doRedeploy = payload.redeploy !== false && m.get("redeploy") !== "0";
+	const hook = doRedeploy
+		? await triggerRedeploy(env)
+		: { ok: true, detail: "跳过重建（批量）" };
+
+	return json({ ok: true, redeploy: hook });
 }
