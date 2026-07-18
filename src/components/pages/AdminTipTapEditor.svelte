@@ -2,7 +2,8 @@
 /**
  * 后台正文 Tiptap 所见即所得
  * - Markdown 存储（marked gfm 入 / turndown-gfm 出）
- * - 表格增删行列、吸顶工具栏、悬浮目录（仿前端 TOC）
+ * - 工具栏吸在「正文编辑区」顶部（非整页 fixed）
+ * - 目录仿文章页 SidebarTOC：右侧 sticky + IntersectionObserver 高亮
  */
 import { Editor } from "@tiptap/core";
 import Image from "@tiptap/extension-image";
@@ -38,6 +39,10 @@ let applyingExternal = false;
 let showToc = true;
 let toc: Array<{ id: string; level: number; text: string; pos: number }> = [];
 let inTable = false;
+/** 当前视口内标题，用于目录高亮（对齐 TOCManager） */
+let activeTocId = "";
+let headingObserver: IntersectionObserver | null = null;
+let scrollSpyRaf = 0;
 
 const turndown = new TurndownService({
 	headingStyle: "atx",
@@ -95,6 +100,88 @@ function refreshMeta() {
 	});
 	toc = items;
 	inTable = editor.isActive("table");
+	// DOM 更新后挂载滚动监听
+	queueMicrotask(() => bindHeadingScrollSpy());
+}
+
+function unbindHeadingScrollSpy() {
+	headingObserver?.disconnect();
+	headingObserver = null;
+	if (scrollSpyRaf) {
+		cancelAnimationFrame(scrollSpyRaf);
+		scrollSpyRaf = 0;
+	}
+}
+
+/**
+ * 仿文章页 TOCManager：用 IntersectionObserver 跟踪正文标题，
+ * 目录侧栏高亮当前段落（随页面滚动更新）。
+ */
+function bindHeadingScrollSpy() {
+	unbindHeadingScrollSpy();
+	if (!hostEl || mode !== "wysiwyg") return;
+	const headings = Array.from(
+		hostEl.querySelectorAll<HTMLElement>("h1, h2, h3, h4"),
+	);
+	if (!headings.length) {
+		activeTocId = "";
+		return;
+	}
+	// 给 DOM 标题打上 data-toc-id，与 toc 数组对齐
+	const items = toc;
+	headings.forEach((el, i) => {
+		const item = items[i];
+		if (item) el.setAttribute("data-toc-id", item.id);
+	});
+
+	const visible = new Map<string, number>();
+	headingObserver = new IntersectionObserver(
+		(entries) => {
+			for (const entry of entries) {
+				const id = (entry.target as HTMLElement).getAttribute("data-toc-id");
+				if (!id) continue;
+				if (entry.isIntersecting) {
+					visible.set(id, entry.intersectionRatio);
+				} else {
+					visible.delete(id);
+				}
+			}
+			if (scrollSpyRaf) cancelAnimationFrame(scrollSpyRaf);
+			scrollSpyRaf = requestAnimationFrame(() => {
+				// 取视口中靠上的可见标题
+				let bestId = "";
+				let bestTop = Number.POSITIVE_INFINITY;
+				for (const el of headings) {
+					const id = el.getAttribute("data-toc-id");
+					if (!id || !visible.has(id)) continue;
+					const top = el.getBoundingClientRect().top;
+					// 工具栏约 3.5rem，优先选刚过顶栏的标题
+					if (top >= 48 && top < bestTop) {
+						bestTop = top;
+						bestId = id;
+					}
+				}
+				if (!bestId) {
+					// 全部在顶栏上方时，取最后一个已滚过的
+					for (let i = headings.length - 1; i >= 0; i--) {
+						const el = headings[i];
+						if (el.getBoundingClientRect().top < 96) {
+							bestId = el.getAttribute("data-toc-id") || "";
+							break;
+						}
+					}
+				}
+				if (bestId) activeTocId = bestId;
+			});
+		},
+		{
+			root: null,
+			// 顶部为吸顶工具栏留白，底部放宽
+			rootMargin: "-80px 0px -55% 0px",
+			threshold: [0, 0.1, 0.5, 1],
+		},
+	);
+	for (const el of headings) headingObserver.observe(el);
 }
 
 function emitMarkdown() {
@@ -153,11 +240,13 @@ function createEditor() {
 }
 
 function destroyEditor() {
+	unbindHeadingScrollSpy();
 	editor?.destroy();
 	editor = null;
 	ready = false;
 	toc = [];
 	inTable = false;
+	activeTocId = "";
 }
 
 function applyExternalContent(md: string) {
@@ -221,15 +310,30 @@ function onSourceInput() {
 
 function scrollToHeading(item: (typeof toc)[0]) {
 	if (mode === "source") return;
-	if (!editor) return;
+	if (!editor || !hostEl) return;
 	const pos = Math.min(item.pos + 1, editor.state.doc.content.size);
 	editor.chain().focus().setTextSelection(pos).run();
+	activeTocId = item.id;
 	try {
+		// 优先滚到 DOM 标题（对齐文章页 hash 跳转）
+		const el = hostEl.querySelector<HTMLElement>(`[data-toc-id="${item.id}"]`);
+		if (el) {
+			const rect = el.getBoundingClientRect();
+			const scroller = document.scrollingElement || document.documentElement;
+			// 预留：正文区内 sticky 工具栏高度
+			const offset = 72;
+			scroller.scrollTo({
+				top: rect.top + scroller.scrollTop - offset,
+				behavior: "smooth",
+			});
+			return;
+		}
 		const coords = editor.view.coordsAtPos(pos);
 		const scroller = document.scrollingElement || document.documentElement;
-		// 预留吸顶工具栏高度
-		const targetY = coords.top + scroller.scrollTop - 140;
-		scroller.scrollTo({ top: targetY, behavior: "smooth" });
+		scroller.scrollTo({
+			top: coords.top + scroller.scrollTop - 72,
+			behavior: "smooth",
+		});
 	} catch {
 		/* ignore */
 	}
@@ -345,82 +449,103 @@ onMount(() => {
 });
 
 onDestroy(() => {
+	unbindHeadingScrollSpy();
 	destroyEditor();
 });
 </script>
 
-<div class="admin-tiptap">
-	<!-- 工具栏：fixed 贴视口顶部，页面滚动时始终可见 -->
-	<div class="admin-tiptap-toolbar" class:is-source={mode === "source"}>
-		{#if mode === "wysiwyg"}
-			<button type="button" class="tb" title="粗体" on:click={toggleBold}
-				><b>B</b></button
-			>
-			<button type="button" class="tb italic" title="斜体" on:click={toggleItalic}
-				>I</button
-			>
-			<button type="button" class="tb" title="下划线" on:click={toggleUnderline}
-				>U</button
-			>
-			<button type="button" class="tb line-through" title="删除线" on:click={toggleStrike}
-				>S</button
-			>
-			<button type="button" class="tb font-mono text-xs" title="行内代码" on:click={toggleCode}
-				>`</button
-			>
-			<span class="sep"></span>
-			<button type="button" class="tb" title="标题 1" on:click={() => setH(1)}>H1</button>
-			<button type="button" class="tb" title="标题 2" on:click={() => setH(2)}>H2</button>
-			<button type="button" class="tb" title="标题 3" on:click={() => setH(3)}>H3</button>
-			<span class="sep"></span>
-			<button type="button" class="tb" title="无序列表" on:click={toggleBullet}>• 列表</button>
-			<button type="button" class="tb" title="有序列表" on:click={toggleOrdered}>1.</button>
-			<button type="button" class="tb" title="引用" on:click={toggleQuote}>引用</button>
-			<button type="button" class="tb" title="代码块" on:click={toggleCodeBlock}>代码块</button>
-			<button type="button" class="tb" title="链接" on:click={setLink}>链接</button>
-			<button type="button" class="tb" title="分隔线" on:click={insertHr}>—</button>
-			<span class="sep"></span>
-			<button type="button" class="tb" title="插入表格" on:click={insertTable}>表格</button>
-			{#if inTable}
-				<button type="button" class="tb" title="左侧加列" on:click={addColBefore}>+列左</button>
-				<button type="button" class="tb" title="右侧加列" on:click={addColAfter}>+列右</button>
-				<button type="button" class="tb" title="删除列" on:click={delCol}>−列</button>
-				<button type="button" class="tb" title="上方加行" on:click={addRowBefore}>+行上</button>
-				<button type="button" class="tb" title="下方加行" on:click={addRowAfter}>+行下</button>
-				<button type="button" class="tb" title="删除行" on:click={delRow}>−行</button>
-				<button type="button" class="tb" title="切换表头行" on:click={toggleHeaderRow}
-					>表头</button
-				>
-				<button type="button" class="tb danger" title="删除整表" on:click={delTable}
-					>删表</button
-				>
-			{/if}
-		{:else}
-			<span class="text-xs text-(--content-meta) px-2">源码模式：直接编辑 Markdown</span>
-		{/if}
-		<div class="flex-1"></div>
-		<button
-			type="button"
-			class="tb {showToc ? 'active' : ''}"
-			title="显示/隐藏目录"
-			on:click={() => (showToc = !showToc)}>目录</button
-		>
-		<button
-			type="button"
-			class="tb {mode === 'wysiwyg' ? 'active' : ''}"
-			on:click={() => setMode("wysiwyg")}>所见即所得</button
-		>
-		<button
-			type="button"
-			class="tb {mode === 'source' ? 'active' : ''}"
-			on:click={() => setMode("source")}>源码</button
-		>
-	</div>
-	<!-- 占位，避免 fixed 工具栏遮住正文开头 -->
-	<div class="admin-tiptap-toolbar-spacer" aria-hidden="true"></div>
-
+<div class="admin-tiptap" class:with-toc={showToc}>
+	<!--
+	  布局对齐文章页：左侧正文列（工具栏 sticky 在正文区顶）+ 右侧目录 sticky。
+	  工具栏不 fixed 到整页，只在「正文编辑区」内吸顶，元数据表单滚过后才贴住。
+	-->
 	<div class="admin-tiptap-main" class:with-toc={showToc}>
-		<div class="admin-tiptap-body" style="min-height: {minHeight}">
+		<div class="admin-tiptap-body">
+			<div class="admin-tiptap-toolbar">
+				{#if mode === "wysiwyg"}
+					<button type="button" class="tb" title="粗体" on:click={toggleBold}
+						><b>B</b></button
+					>
+					<button type="button" class="tb italic" title="斜体" on:click={toggleItalic}
+						>I</button
+					>
+					<button type="button" class="tb" title="下划线" on:click={toggleUnderline}
+						>U</button
+					>
+					<button type="button" class="tb line-through" title="删除线" on:click={toggleStrike}
+						>S</button
+					>
+					<button
+						type="button"
+						class="tb font-mono text-xs"
+						title="行内代码"
+						on:click={toggleCode}>`</button
+					>
+					<span class="sep"></span>
+					<button type="button" class="tb" title="标题 1" on:click={() => setH(1)}>H1</button>
+					<button type="button" class="tb" title="标题 2" on:click={() => setH(2)}>H2</button>
+					<button type="button" class="tb" title="标题 3" on:click={() => setH(3)}>H3</button>
+					<span class="sep"></span>
+					<button type="button" class="tb" title="无序列表" on:click={toggleBullet}
+						>• 列表</button
+					>
+					<button type="button" class="tb" title="有序列表" on:click={toggleOrdered}
+						>1.</button
+					>
+					<button type="button" class="tb" title="引用" on:click={toggleQuote}>引用</button>
+					<button type="button" class="tb" title="代码块" on:click={toggleCodeBlock}
+						>代码块</button
+					>
+					<button type="button" class="tb" title="链接" on:click={setLink}>链接</button>
+					<button type="button" class="tb" title="分隔线" on:click={insertHr}>—</button>
+					<span class="sep"></span>
+					<button type="button" class="tb" title="插入表格" on:click={insertTable}
+						>表格</button
+					>
+					{#if inTable}
+						<button type="button" class="tb" title="左侧加列" on:click={addColBefore}
+							>+列左</button
+						>
+						<button type="button" class="tb" title="右侧加列" on:click={addColAfter}
+							>+列右</button
+						>
+						<button type="button" class="tb" title="删除列" on:click={delCol}>−列</button>
+						<button type="button" class="tb" title="上方加行" on:click={addRowBefore}
+							>+行上</button
+						>
+						<button type="button" class="tb" title="下方加行" on:click={addRowAfter}
+							>+行下</button
+						>
+						<button type="button" class="tb" title="删除行" on:click={delRow}>−行</button>
+						<button type="button" class="tb" title="切换表头行" on:click={toggleHeaderRow}
+							>表头</button
+						>
+						<button type="button" class="tb danger" title="删除整表" on:click={delTable}
+							>删表</button
+						>
+					{/if}
+				{:else}
+					<span class="text-xs text-(--content-meta) px-2">源码模式：直接编辑 Markdown</span>
+				{/if}
+				<div class="flex-1"></div>
+				<button
+					type="button"
+					class="tb {showToc ? 'active' : ''}"
+					title="显示/隐藏目录"
+					on:click={() => (showToc = !showToc)}>目录</button
+				>
+				<button
+					type="button"
+					class="tb {mode === 'wysiwyg' ? 'active' : ''}"
+					on:click={() => setMode("wysiwyg")}>所见即所得</button
+				>
+				<button
+					type="button"
+					class="tb {mode === 'source' ? 'active' : ''}"
+					on:click={() => setMode("source")}>源码</button
+				>
+			</div>
+
 			{#if mode === "wysiwyg"}
 				<div
 					bind:this={hostEl}
@@ -439,7 +564,6 @@ onDestroy(() => {
 		</div>
 
 		{#if showToc}
-			<!-- 仿文章页侧栏目录：右侧 sticky，始终在视口内可点 -->
 			<aside class="admin-toc-sidebar" aria-label="文章目录">
 				<div class="admin-toc-sidebar-inner">
 					<div class="admin-toc-panel-title">目录</div>
@@ -451,7 +575,10 @@ onDestroy(() => {
 								{#each toc as item, i (item.id)}
 									<button
 										type="button"
-										class="toc-item toc-level-{Math.min(item.level, 3)}"
+										class="toc-item toc-level-{Math.min(item.level, 3)} {activeTocId ===
+										item.id
+											? 'visible active'
+											: ''}"
 										title={item.text}
 										on:click={() => scrollToHeading(item)}
 									>
@@ -463,6 +590,10 @@ onDestroy(() => {
 										>
 									</button>
 								{/each}
+								<div
+									class="toc-active-indicator"
+									style="opacity: {activeTocId ? 1 : 0};"
+								></div>
 							</div>
 						{/if}
 					</div>
@@ -505,52 +636,40 @@ onDestroy(() => {
 		--admin-heading-fg: #0f172a;
 	}
 
-	.admin-tiptap-toolbar {
-		position: fixed;
-		left: 0;
-		right: 0;
-		top: 0;
-		z-index: 80;
-		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		gap: 0.25rem;
-		padding: 0.45rem 0.75rem;
-		border-bottom: 1px solid var(--btn-regular-bg);
-		background: color-mix(in srgb, var(--card-bg) 94%, transparent);
-		backdrop-filter: blur(12px);
-		-webkit-backdrop-filter: blur(12px);
-		box-shadow: 0 4px 16px -10px rgba(0, 0, 0, 0.35);
-		/* 与站点主内容同宽的大致边距，避免贴边 */
-		padding-left: max(0.75rem, calc((100vw - min(72rem, 100vw)) / 2 + 0.75rem));
-		padding-right: max(0.75rem, calc((100vw - min(72rem, 100vw)) / 2 + 0.75rem));
-	}
-	.admin-tiptap-toolbar-spacer {
-		height: 3.25rem;
-	}
-	@media (max-width: 640px) {
-		.admin-tiptap-toolbar {
-			padding-left: 0.5rem;
-			padding-right: 0.5rem;
-		}
-		.admin-tiptap-toolbar-spacer {
-			height: 4.5rem;
-		}
-	}
-
 	.admin-tiptap-main {
 		display: grid;
 		grid-template-columns: 1fr;
-		gap: 0.75rem;
+		gap: 0.85rem;
 		align-items: start;
 	}
 	.admin-tiptap-main.with-toc {
+		/* 正文 + 侧栏目录，对齐文章页主栏/侧栏关系 */
 		grid-template-columns: minmax(0, 1fr) 15.5rem;
 	}
 	@media (max-width: 960px) {
 		.admin-tiptap-main.with-toc {
 			grid-template-columns: 1fr;
 		}
+	}
+
+	/*
+	 * 工具栏：sticky 在「正文编辑区」顶部，不是 fixed 到整页。
+	 * 父级 admin-editor-shell / admin-tiptap-body 必须 overflow:visible。
+	 */
+	.admin-tiptap-toolbar {
+		position: sticky;
+		top: 0;
+		z-index: 25;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.25rem;
+		padding: 0.45rem 0.65rem;
+		border-bottom: 1px solid var(--btn-regular-bg);
+		background: color-mix(in srgb, var(--card-bg) 94%, transparent);
+		backdrop-filter: blur(12px);
+		-webkit-backdrop-filter: blur(12px);
+		box-shadow: 0 4px 14px -12px rgba(0, 0, 0, 0.4);
 	}
 
 	.tb {
@@ -589,6 +708,7 @@ onDestroy(() => {
 		border: 1px solid var(--btn-regular-bg);
 		border-radius: 0.75rem;
 		background: var(--card-bg);
+		/* 关键：不能 hidden，否则内部 sticky 工具栏失效 */
 		overflow: visible;
 	}
 	.admin-tiptap-host {
@@ -607,10 +727,11 @@ onDestroy(() => {
 		resize: vertical;
 	}
 
-	/* 右侧目录：仿文章页侧栏，sticky 贴在视口 */
+	/* 右侧目录：对齐 SidebarTOC — sticky 随页面滚动，目录自身可滚 */
 	.admin-toc-sidebar {
 		position: sticky;
-		top: 4rem; /* 在 fixed 工具栏下方 */
+		/* 与正文工具栏错开一点，贴在视口上方 */
+		top: 0.75rem;
 		align-self: start;
 		z-index: 10;
 	}
@@ -631,7 +752,8 @@ onDestroy(() => {
 		padding: 0 0.65rem 0.4rem;
 	}
 	.admin-toc-scroll {
-		max-height: min(70vh, calc(100vh - 7rem));
+		/* 对齐 .toc-scroll-container max-height: calc(100vh - 25rem) 的思路 */
+		max-height: min(70vh, calc(100vh - 8rem));
 		padding: 0 0.25rem 0.25rem;
 		overflow-y: auto;
 		overscroll-behavior: contain;
@@ -644,6 +766,22 @@ onDestroy(() => {
 		.admin-toc-scroll {
 			max-height: 14rem;
 		}
+	}
+
+	/* 当前标题高亮（对齐 .toc-item.visible） */
+	:global(.admin-toc-sidebar .toc-item.active),
+	:global(.admin-toc-sidebar .toc-item.visible) {
+		background: color-mix(in srgb, var(--primary) 12%, transparent);
+	}
+	:global(.admin-toc-sidebar .toc-item.active .toc-label),
+	:global(.admin-toc-sidebar .toc-item.visible .toc-label) {
+		color: var(--primary);
+		font-weight: 600;
+	}
+	:global(.admin-toc-sidebar .toc-item.active .toc-badge-index),
+	:global(.admin-toc-sidebar .toc-item.visible .toc-badge-index) {
+		background: color-mix(in srgb, var(--primary) 22%, var(--btn-regular-bg));
+		color: var(--primary);
 	}
 
 	:global(.admin-toc-sidebar .toc-content) {
