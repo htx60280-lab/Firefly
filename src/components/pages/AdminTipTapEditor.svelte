@@ -22,6 +22,8 @@ import { createEventDispatcher, onDestroy, onMount, tick } from "svelte";
 import TurndownService from "turndown";
 // @ts-expect-error no types
 import { gfm } from "turndown-plugin-gfm";
+import "@/styles/toc.css";
+import { computeTocItems, type TocItem } from "@/utils/toc-shared";
 
 export let content = "";
 export let contentKey = "";
@@ -43,6 +45,47 @@ let inTable = false;
 let activeTocId = "";
 let headingObserver: IntersectionObserver | null = null;
 let scrollSpyRaf = 0;
+let tocContentEl: HTMLDivElement | null = null;
+let tocIndicatorEl: HTMLDivElement | null = null;
+
+/** 与 SidebarTOC 一致：相对深度、编号/圆点徽章 */
+function computeAdminTocItems(
+	items: Array<{ id: string; level: number; text: string; pos: number }>,
+): Array<TocItem & { pos: number; id: string }> {
+	const mapped = computeTocItems(
+		items.map((it) => ({ depth: it.level, slug: it.id, text: it.text })),
+		{ maxLevel: 3 },
+	);
+	const byId = new Map(items.map((it) => [it.id, it]));
+	return mapped.map((m) => {
+		const raw = byId.get(m.headingId);
+		return { ...m, id: m.headingId, pos: raw?.pos ?? 0 };
+	});
+}
+
+$: displayToc = computeAdminTocItems(toc);
+
+function updateTocIndicator() {
+	if (!tocContentEl || !tocIndicatorEl) return;
+	if (!activeTocId) {
+		tocIndicatorEl.style.opacity = "0";
+		return;
+	}
+	const active = tocContentEl.querySelector<HTMLElement>(
+		`.toc-item[data-heading-id="${activeTocId}"]`,
+	);
+	if (!active) {
+		tocIndicatorEl.style.opacity = "0";
+		return;
+	}
+	const parentTop = tocContentEl.getBoundingClientRect().top;
+	const r = active.getBoundingClientRect();
+	tocIndicatorEl.style.opacity = "1";
+	tocIndicatorEl.style.top = `${r.top - parentTop + tocContentEl.scrollTop}px`;
+	tocIndicatorEl.style.height = `${r.height}px`;
+}
+
+$: activeTocId, displayToc, void queueMicrotask(() => updateTocIndicator());
 
 const turndown = new TurndownService({
 	headingStyle: "atx",
@@ -171,7 +214,10 @@ function bindHeadingScrollSpy() {
 						}
 					}
 				}
-				if (bestId) activeTocId = bestId;
+				if (bestId) {
+					activeTocId = bestId;
+					updateTocIndicator();
+				}
 			});
 		},
 		{
@@ -319,12 +365,13 @@ function stickyOffsetPx(): number {
 	return nav + tb + th + 8;
 }
 
-function scrollToHeading(item: (typeof toc)[0]) {
+function scrollToHeading(item: { id: string; pos: number; text?: string }) {
 	if (mode === "source") return;
 	if (!editor || !hostEl) return;
 	const pos = Math.min(item.pos + 1, editor.state.doc.content.size);
 	editor.chain().focus().setTextSelection(pos).run();
 	activeTocId = item.id;
+	updateTocIndicator();
 	try {
 		// 优先滚到 DOM 标题（对齐文章页 hash 跳转）
 		const el = hostEl.querySelector<HTMLElement>(`[data-toc-id="${item.id}"]`);
@@ -575,37 +622,47 @@ onDestroy(() => {
 
 		{#if showToc}
 			<aside class="admin-toc-sidebar" aria-label="文章目录">
-				<div class="admin-toc-sidebar-inner">
-					<div class="admin-toc-panel-title">目录</div>
-					<div class="toc-scroll-container admin-toc-scroll">
-						{#if toc.length === 0}
-							<div class="text-xs text-(--content-meta) px-2 py-2">暂无标题</div>
-						{:else}
-							<div class="toc-content">
-								{#each toc as item, i (item.id)}
-									<button
-										type="button"
-										class="toc-item toc-level-{Math.min(item.level, 3)} {activeTocId ===
-										item.id
-											? 'visible active'
-											: ''}"
-										title={item.text}
-										on:click={() => scrollToHeading(item)}
-									>
-										<span class="toc-badge toc-badge-index">{i + 1}</span>
-										<span
-											class="toc-label {item.level <= 2
-												? 'toc-label-primary'
-												: 'toc-label-secondary'}">{item.text}</span
+				<div class="admin-toc-widget card-base pb-4">
+					<div
+						class="widget-title font-bold transition text-lg text-neutral-900 dark:text-neutral-100 relative ml-8 mt-4 mb-2 before:w-1 before:h-4 before:rounded-md before:bg-(--primary) before:absolute before:left-[-16px] before:top-[5.5px] flex items-center justify-between"
+					>
+						<span class="widget-name">文章目录</span>
+					</div>
+					<div class="px-4">
+						<div class="toc-scroll-container custom-scrollbar admin-toc-scroll">
+							<div class="toc-content" bind:this={tocContentEl}>
+								{#if displayToc.length === 0}
+									<div class="text-center py-8 text-gray-500 dark:text-gray-400">
+										<p>暂无标题</p>
+									</div>
+								{:else}
+									{#each displayToc as item (item.id)}
+										<button
+											type="button"
+											class="toc-item toc-level-{item.depthLevel} {activeTocId === item.id ? 'visible' : ''}"
+											data-heading-id={item.id}
+											title={item.text}
+											aria-label={item.text}
+											on:click={() => scrollToHeading(item)}
 										>
-									</button>
-								{/each}
-								<div
-									class="toc-active-indicator"
-									style="opacity: {activeTocId ? 1 : 0};"
-								></div>
+											<div class="toc-badge {item.badgeKind === 'index' ? 'toc-badge-index' : ''}">
+												{#if item.badgeKind === "index"}
+													{item.badgeIndex}
+												{:else if item.badgeKind === "dot"}
+													<span class="toc-badge-dot"></span>
+												{:else}
+													<span class="toc-badge-dot toc-badge-dot-sm"></span>
+												{/if}
+											</div>
+											<div class="toc-label {item.labelPrimary ? 'toc-label-primary' : 'toc-label-secondary'}">
+												{item.text}
+											</div>
+										</button>
+									{/each}
+									<div class="toc-active-indicator" bind:this={tocIndicatorEl} style="opacity: 0;"></div>
+								{/if}
 							</div>
-						{/if}
+						</div>
 					</div>
 				</div>
 			</aside>
@@ -741,39 +798,31 @@ onDestroy(() => {
 		resize: vertical;
 	}
 
-	/* 右侧目录：对齐 SidebarTOC — sticky 随页面滚动，目录自身可滚 */
+	/* 右侧目录：布局 sticky；条目样式复用全局 toc.css（与文章页 SidebarTOC 一致） */
 	.admin-toc-sidebar {
 		position: sticky;
-		/* stickyNavbar 时与侧栏目录一致，顶在导航下方 */
 		top: 5.5rem;
 		align-self: start;
 		z-index: 10;
+		min-width: 0;
 	}
 	:global(body:not(.sticky-navbar)) .admin-toc-sidebar {
 		top: 0.75rem;
 	}
-	.admin-toc-sidebar-inner {
-		border: 1px solid color-mix(in srgb, var(--btn-regular-bg) 90%, transparent);
-		border-radius: 1rem;
-		background: color-mix(in srgb, var(--card-bg) 96%, transparent);
-		backdrop-filter: blur(10px);
-		padding: 0.55rem 0.35rem 0.45rem;
-		box-shadow: 0 8px 28px -18px rgba(0, 0, 0, 0.35);
-		--toc-btn-hover: color-mix(in srgb, var(--btn-regular-bg) 70%, transparent);
-		--toc-badge-bg: color-mix(in srgb, var(--btn-regular-bg) 80%, var(--primary) 8%);
-	}
-	.admin-toc-panel-title {
-		font-size: 0.75rem;
-		font-weight: 700;
-		color: var(--content-meta);
-		padding: 0 0.65rem 0.4rem;
+	.admin-toc-widget {
+		overflow: hidden;
 	}
 	.admin-toc-scroll {
-		/* 对齐 .toc-scroll-container max-height: calc(100vh - 25rem) 的思路 */
-		max-height: min(70vh, calc(100vh - 8rem));
-		padding: 0 0.25rem 0.25rem;
-		overflow-y: auto;
-		overscroll-behavior: contain;
+		max-height: min(70vh, calc(100vh - 10rem));
+		padding-right: 0.125rem;
+	}
+	/* button 版 toc-item 补齐 a 标签默认外观；其余交给 toc.css */
+	:global(.admin-toc-sidebar .toc-item) {
+		border: 0;
+		background: transparent;
+		cursor: pointer;
+		font: inherit;
+		text-align: left;
 	}
 	@media (max-width: 960px) {
 		.admin-toc-sidebar {
@@ -783,84 +832,6 @@ onDestroy(() => {
 		.admin-toc-scroll {
 			max-height: 14rem;
 		}
-	}
-
-	/* 当前标题高亮（对齐 .toc-item.visible） */
-	:global(.admin-toc-sidebar .toc-item.active),
-	:global(.admin-toc-sidebar .toc-item.visible) {
-		background: color-mix(in srgb, var(--primary) 12%, transparent);
-	}
-	:global(.admin-toc-sidebar .toc-item.active .toc-label),
-	:global(.admin-toc-sidebar .toc-item.visible .toc-label) {
-		color: var(--primary);
-		font-weight: 600;
-	}
-	:global(.admin-toc-sidebar .toc-item.active .toc-badge-index),
-	:global(.admin-toc-sidebar .toc-item.visible .toc-badge-index) {
-		background: color-mix(in srgb, var(--primary) 22%, var(--btn-regular-bg));
-		color: var(--primary);
-	}
-
-	:global(.admin-toc-sidebar .toc-content) {
-		display: flex;
-		flex-direction: column;
-		gap: 0.28rem;
-		position: relative;
-	}
-	:global(.admin-toc-sidebar .toc-item) {
-		display: flex;
-		align-items: center;
-		gap: 0.55rem;
-		width: 100%;
-		border: 0;
-		background: transparent;
-		border-radius: 0.875rem;
-		padding: 0.48rem 0.62rem;
-		min-height: 2.2rem;
-		cursor: pointer;
-		color: inherit;
-		text-align: left;
-	}
-	:global(.admin-toc-sidebar .toc-item:hover) {
-		background: var(--toc-btn-hover);
-	}
-	:global(.admin-toc-sidebar .toc-item.toc-level-1) {
-		padding-left: 0.62rem;
-	}
-	:global(.admin-toc-sidebar .toc-item.toc-level-2) {
-		padding-left: 1.1rem;
-	}
-	:global(.admin-toc-sidebar .toc-item.toc-level-3) {
-		padding-left: 1.5rem;
-	}
-	:global(.admin-toc-sidebar .toc-badge) {
-		display: grid;
-		place-items: center;
-		flex-shrink: 0;
-		width: 1.35rem;
-		height: 1.35rem;
-		border-radius: 0.5rem;
-		font-size: 0.68rem;
-		font-weight: 700;
-	}
-	:global(.admin-toc-sidebar .toc-badge-index) {
-		background: var(--toc-badge-bg);
-		color: var(--btn-content);
-	}
-	:global(.admin-toc-sidebar .toc-label) {
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		min-width: 0;
-		flex: 1;
-		font-size: 0.86rem;
-		line-height: 1.3;
-	}
-	:global(.admin-toc-sidebar .toc-label-primary) {
-		color: color-mix(in srgb, var(--content-meta) 40%, var(--btn-content));
-	}
-	:global(.admin-toc-sidebar .toc-label-secondary) {
-		color: var(--content-meta);
 	}
 
 	:global(.admin-tiptap-host .tiptap) {
