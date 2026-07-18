@@ -5,7 +5,7 @@ updated: "2026-07-18"
 draft: false
 description: 博客的第一篇占位文章 —— 风起于此。
 image: ""
-tags: []
+tags: [随笔]
 category: 公告
 lang: ""
 pinned: false
