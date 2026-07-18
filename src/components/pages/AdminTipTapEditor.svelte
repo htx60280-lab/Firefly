@@ -1,18 +1,24 @@
 <script lang="ts">
 /**
  * 后台正文 Tiptap 所见即所得编辑器
- * - 存储仍为 Markdown（marked 入 / turndown 出）
- * - 支持源码模式切换
+ * - Markdown 存储（marked 入 / turndown+gfm 出）
+ * - 表格、标题侧栏目录、源码模式
  */
 import { Editor } from "@tiptap/core";
 import Image from "@tiptap/extension-image";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
+import { Table } from "@tiptap/extension-table";
+import TableCell from "@tiptap/extension-table-cell";
+import TableHeader from "@tiptap/extension-table-header";
+import TableRow from "@tiptap/extension-table-row";
 import Underline from "@tiptap/extension-underline";
 import StarterKit from "@tiptap/starter-kit";
 import { marked } from "marked";
 import { createEventDispatcher, onDestroy, onMount } from "svelte";
 import TurndownService from "turndown";
+// @ts-expect-error no types for plugin entry
+import { gfm } from "turndown-plugin-gfm";
 
 export let content = "";
 /** 切换文章时递增，强制把外部 Markdown 灌入编辑器 */
@@ -27,8 +33,10 @@ let editor: Editor | null = null;
 let mode: "wysiwyg" | "source" = "wysiwyg";
 let sourceText = "";
 let ready = false;
-/** 避免 setContent 触发的 update 回写造成环 */
 let applyingExternal = false;
+let showToc = true;
+let toc: Array<{ id: string; level: number; text: string; pos: number }> = [];
+let inTable = false;
 
 const turndown = new TurndownService({
 	headingStyle: "atx",
@@ -36,10 +44,7 @@ const turndown = new TurndownService({
 	bulletListMarker: "-",
 	emDelimiter: "*",
 });
-turndown.addRule("strikethrough", {
-	filter: ["del", "s", "strike"] as unknown as string[],
-	replacement: (t: string) => `~~${t}~~`,
-});
+turndown.use(gfm);
 turndown.addRule("underline", {
 	filter: ["u"] as unknown as string[],
 	replacement: (t: string) => `<u>${t}</u>`,
@@ -47,7 +52,11 @@ turndown.addRule("underline", {
 
 function mdToHtml(md: string): string {
 	try {
-		const html = marked.parse(md || "", { async: false, breaks: true });
+		const html = marked.parse(md || "", {
+			async: false,
+			breaks: true,
+			gfm: true,
+		});
 		return typeof html === "string" ? html : "";
 	} catch {
 		return `<p>${escapeHtml(md || "")}</p>`;
@@ -69,11 +78,31 @@ function escapeHtml(s: string): string {
 	);
 }
 
+function refreshToc() {
+	if (!editor) {
+		toc = [];
+		return;
+	}
+	const items: typeof toc = [];
+	const { doc } = editor.state;
+	doc.descendants((node, pos) => {
+		if (node.type.name === "heading") {
+			const level = node.attrs.level as number;
+			const text = node.textContent.trim() || `标题 ${level}`;
+			const id = `h-${pos}`;
+			items.push({ id, level, text, pos });
+		}
+	});
+	toc = items;
+	inTable = editor.isActive("table");
+}
+
 function emitMarkdown() {
 	if (!editor || applyingExternal) return;
 	const md = htmlToMd(editor.getHTML());
 	content = md;
 	dispatch("change", md);
+	refreshToc();
 }
 
 function createEditor() {
@@ -91,8 +120,15 @@ function createEditor() {
 				HTMLAttributes: { rel: "noopener noreferrer", target: "_blank" },
 			}),
 			Image.configure({ inline: false, allowBase64: false }),
+			Table.configure({
+				resizable: true,
+				HTMLAttributes: { class: "admin-tiptap-table" },
+			}),
+			TableRow,
+			TableHeader,
+			TableCell,
 			Placeholder.configure({
-				placeholder: "开始写作…支持标题、列表、代码块、链接、图片",
+				placeholder: "开始写作…支持标题、列表、表格、代码块、链接、图片",
 			}),
 		],
 		content: mdToHtml(content),
@@ -105,14 +141,20 @@ function createEditor() {
 		onUpdate: () => {
 			emitMarkdown();
 		},
+		onSelectionUpdate: () => {
+			if (editor) inTable = editor.isActive("table");
+		},
 	});
 	ready = true;
+	refreshToc();
 }
 
 function destroyEditor() {
 	editor?.destroy();
 	editor = null;
 	ready = false;
+	toc = [];
+	inTable = false;
 }
 
 function applyExternalContent(md: string) {
@@ -122,9 +164,9 @@ function applyExternalContent(md: string) {
 	applyingExternal = true;
 	editor.commands.setContent(mdToHtml(md || ""), { emitUpdate: false });
 	applyingExternal = false;
+	refreshToc();
 }
 
-// 仅在 contentKey 变化时灌入外部 Markdown，避免把用户输入回写成 setContent
 let lastAppliedKey = "";
 $: if (ready && contentKey !== lastAppliedKey) {
 	lastAppliedKey = contentKey;
@@ -134,17 +176,16 @@ $: if (ready && contentKey !== lastAppliedKey) {
 function setMode(next: "wysiwyg" | "source") {
 	if (next === mode) return;
 	if (next === "source") {
-		// 从所见即所得取出最新 MD
 		if (editor) sourceText = htmlToMd(editor.getHTML());
 		else sourceText = content;
 		mode = "source";
 		destroyEditor();
+		// 源码模式用 Markdown 标题生成简易目录
+		toc = parseMdToc(sourceText);
 	} else {
-		// 源码 → 所见即所得
 		content = sourceText;
 		dispatch("change", sourceText);
 		mode = "wysiwyg";
-		// 等 DOM 挂载 host
 		requestAnimationFrame(() => {
 			createEditor();
 			applyExternalContent(sourceText);
@@ -152,15 +193,53 @@ function setMode(next: "wysiwyg" | "source") {
 	}
 }
 
+function parseMdToc(md: string) {
+	const items: typeof toc = [];
+	const lines = (md || "").split("\n");
+	lines.forEach((line, i) => {
+		const m = line.match(/^(#{1,4})\s+(.+)$/);
+		if (!m) return;
+		items.push({
+			id: `md-h-${i}`,
+			level: m[1].length,
+			text: m[2].trim(),
+			pos: i,
+		});
+	});
+	return items;
+}
+
 function onSourceInput() {
 	content = sourceText;
 	dispatch("change", sourceText);
+	toc = parseMdToc(sourceText);
+}
+
+function scrollToHeading(item: (typeof toc)[0]) {
+	if (mode === "source") {
+		// 源码：尽量滚到对应行（textarea 无精确 API，仅更新提示）
+		return;
+	}
+	if (!editor) return;
+	editor.chain().focus().setTextSelection(item.pos + 1).run();
+	// 滚到视图
+	try {
+		const dom = editor.view.domAtPos(item.pos + 1);
+		const el =
+			dom.node instanceof HTMLElement
+				? dom.node
+				: (dom.node.parentElement as HTMLElement | null);
+		el?.scrollIntoView({ behavior: "smooth", block: "center" });
+	} catch {
+		/* ignore */
+	}
 }
 
 function cmd(fn: (e: Editor) => void) {
 	if (!editor) return;
 	fn(editor);
 	editor.chain().focus().run();
+	refreshToc();
 }
 
 function toggleBold() {
@@ -207,8 +286,36 @@ function setLink() {
 function insertHr() {
 	cmd((e) => e.chain().focus().setHorizontalRule().run());
 }
+function insertTable() {
+	cmd((e) =>
+		e.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run(),
+	);
+}
+function addColBefore() {
+	cmd((e) => e.chain().focus().addColumnBefore().run());
+}
+function addColAfter() {
+	cmd((e) => e.chain().focus().addColumnAfter().run());
+}
+function delCol() {
+	cmd((e) => e.chain().focus().deleteColumn().run());
+}
+function addRowBefore() {
+	cmd((e) => e.chain().focus().addRowBefore().run());
+}
+function addRowAfter() {
+	cmd((e) => e.chain().focus().addRowAfter().run());
+}
+function delRow() {
+	cmd((e) => e.chain().focus().deleteRow().run());
+}
+function delTable() {
+	cmd((e) => e.chain().focus().deleteTable().run());
+}
+function toggleHeaderRow() {
+	cmd((e) => e.chain().focus().toggleHeaderRow().run());
+}
 
-/** 供父组件插入图片 Markdown / URL */
 export function insertImage(src: string, alt = "图片") {
 	if (mode === "source") {
 		const snip = `\n![${alt}](${src})\n\n`;
@@ -221,7 +328,6 @@ export function insertImage(src: string, alt = "图片") {
 	emitMarkdown();
 }
 
-/** 供父组件在暂存前强制同步最新 MD */
 export function getMarkdown(): string {
 	if (mode === "source") return sourceText;
 	if (editor) return htmlToMd(editor.getHTML());
@@ -264,13 +370,33 @@ onDestroy(() => {
 			<button type="button" class="tb" title="代码块" on:click={toggleCodeBlock}>代码块</button>
 			<button type="button" class="tb" title="链接" on:click={setLink}>链接</button>
 			<button type="button" class="tb" title="分隔线" on:click={insertHr}>—</button>
+			<span class="sep"></span>
+			<button type="button" class="tb" title="插入 3×3 表格" on:click={insertTable}>表格</button>
+			{#if inTable}
+				<button type="button" class="tb" title="左侧加列" on:click={addColBefore}>←列</button>
+				<button type="button" class="tb" title="右侧加列" on:click={addColAfter}>列→</button>
+				<button type="button" class="tb" title="删除列" on:click={delCol}>删列</button>
+				<button type="button" class="tb" title="上方加行" on:click={addRowBefore}>↑行</button>
+				<button type="button" class="tb" title="下方加行" on:click={addRowAfter}>行↓</button>
+				<button type="button" class="tb" title="删除行" on:click={delRow}>删行</button>
+				<button type="button" class="tb" title="表头行" on:click={toggleHeaderRow}>表头</button>
+				<button type="button" class="tb text-red-600" title="删除表格" on:click={delTable}
+					>删表</button
+				>
+			{/if}
 		{:else}
 			<span class="text-xs text-(--content-meta) px-2">源码模式：直接编辑 Markdown</span>
 		{/if}
 		<div class="flex-1"></div>
 		<button
 			type="button"
-			class="tb {!mode || mode === 'wysiwyg' ? 'active' : ''}"
+			class="tb {showToc ? 'active' : ''}"
+			title="显示/隐藏目录"
+			on:click={() => (showToc = !showToc)}>目录</button
+		>
+		<button
+			type="button"
+			class="tb {mode === 'wysiwyg' ? 'active' : ''}"
 			on:click={() => setMode("wysiwyg")}>所见即所得</button
 		>
 		<button
@@ -280,21 +406,50 @@ onDestroy(() => {
 		>
 	</div>
 
-	{#if mode === "wysiwyg"}
-		<div
-			bind:this={hostEl}
-			class="admin-tiptap-host overflow-auto"
-			style="min-height: {minHeight}"
-		></div>
-	{:else}
-		<textarea
-			bind:value={sourceText}
-			on:input={onSourceInput}
-			class="w-full px-4 py-3 font-mono text-sm text-(--btn-content) bg-(--card-bg) border-0 focus:outline-none resize-y"
-			style="min-height: {minHeight}"
-			spellcheck="false"
-		></textarea>
-	{/if}
+	<div class="flex min-h-0" style="min-height: {minHeight}">
+		{#if showToc}
+			<aside
+				class="toc-aside w-44 shrink-0 border-r border-(--btn-regular-bg) overflow-y-auto py-2 px-2 hidden sm:block"
+			>
+				<div class="text-xs font-semibold text-(--content-meta) px-1 mb-2">目录</div>
+				{#if toc.length === 0}
+					<div class="text-xs text-(--content-meta) px-1">暂无标题</div>
+				{:else}
+					<nav class="flex flex-col gap-0.5">
+						{#each toc as item (item.id)}
+							<button
+								type="button"
+								class="toc-item text-left text-xs text-(--btn-content) hover:text-(--primary) truncate rounded px-1 py-0.5"
+								style="padding-left: {(item.level - 1) * 0.55 + 0.25}rem"
+								title={item.text}
+								on:click={() => scrollToHeading(item)}
+							>
+								{item.text}
+							</button>
+						{/each}
+					</nav>
+				{/if}
+			</aside>
+		{/if}
+
+		<div class="flex-1 min-w-0 flex flex-col">
+			{#if mode === "wysiwyg"}
+				<div
+					bind:this={hostEl}
+					class="admin-tiptap-host overflow-auto flex-1"
+					style="min-height: {minHeight}"
+				></div>
+			{:else}
+				<textarea
+					bind:value={sourceText}
+					on:input={onSourceInput}
+					class="w-full flex-1 px-4 py-3 font-mono text-sm text-(--btn-content) bg-(--card-bg) border-0 focus:outline-none resize-y"
+					style="min-height: {minHeight}"
+					spellcheck="false"
+				></textarea>
+			{/if}
+		</div>
+	</div>
 </div>
 
 <style>
@@ -319,6 +474,9 @@ onDestroy(() => {
 		height: 16px;
 		background: var(--btn-regular-bg);
 		margin: 0 4px;
+	}
+	.toc-item:hover {
+		background: var(--btn-regular-bg);
 	}
 	:global(.admin-tiptap-host .tiptap) {
 		min-height: 360px;
@@ -396,5 +554,43 @@ onDestroy(() => {
 		border: none;
 		border-top: 1px solid var(--btn-regular-bg);
 		margin: 1em 0;
+	}
+	/* 表格 */
+	:global(.admin-tiptap-prose table),
+	:global(.admin-tiptap-prose .admin-tiptap-table) {
+		border-collapse: collapse;
+		width: 100%;
+		margin: 0.75em 0;
+		table-layout: fixed;
+		overflow: hidden;
+	}
+	:global(.admin-tiptap-prose th),
+	:global(.admin-tiptap-prose td) {
+		border: 1px solid var(--btn-regular-bg);
+		padding: 0.45em 0.65em;
+		vertical-align: top;
+		position: relative;
+		min-width: 2.5em;
+	}
+	:global(.admin-tiptap-prose th) {
+		background: color-mix(in srgb, var(--btn-regular-bg) 70%, transparent);
+		font-weight: 600;
+	}
+	:global(.admin-tiptap-prose .selectedCell::after) {
+		content: "";
+		position: absolute;
+		inset: 0;
+		background: color-mix(in srgb, var(--primary) 12%, transparent);
+		pointer-events: none;
+		z-index: 1;
+	}
+	:global(.admin-tiptap-prose .column-resize-handle) {
+		position: absolute;
+		right: -2px;
+		top: 0;
+		bottom: 0;
+		width: 4px;
+		background: var(--primary);
+		pointer-events: none;
 	}
 </style>
